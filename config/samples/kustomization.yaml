@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- kilo_v1alpha1_clustermesh.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

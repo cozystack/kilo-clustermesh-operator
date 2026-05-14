@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.3"
+      - uses: golangci/golangci-lint-action@v7
+        with:
+          version: latest
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.3"
+      - run: go test ./api/... ./pkg/... ./internal/... -race -coverprofile=coverage.out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.3"
+      - run: go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
+      - run: |
+          export KUBEBUILDER_ASSETS=$(setup-envtest use -p path)
+          go test ./test/integration/... -race -timeout 120s
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.3"
+      - run: go build -o /dev/null ./cmd/main.go
+
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - run: helm plugin install https://github.com/helm-unittest/helm-unittest
+      - run: helm lint charts/kilo-clustermesh-operator --strict
+      - run: helm unittest charts/kilo-clustermesh-operator
+
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.3"
+      - run: make manifests generate
+      - run: git diff --exit-code

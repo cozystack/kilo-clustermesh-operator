@@ -1,0 +1,6 @@
+# Generated code
+**/zz_generated.*.go linguist-generated
+config/crd/bases/*.yaml linguist-generated
+
+# Vendored Kilo types
+pkg/kilo/** linguist-vendored

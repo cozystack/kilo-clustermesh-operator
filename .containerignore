@@ -1,0 +1,11 @@
+.git
+.github
+bin/
+dist/
+vendor/
+*.md
+LICENSE
+hack/
+charts/
+test/
+cover*.out
