@@ -22,8 +22,11 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
+// GroupName is the API group used by Kilo's Peer type.
+const GroupName = "kilo.squat.ai"
+
 // SchemeGroupVersion is group version used to register these objects.
-var SchemeGroupVersion = schema.GroupVersion{Group: "kilo.squat.ai", Version: "v1alpha1"} //nolint:gochecknoglobals // kubebuilder-required package-level scheme registration variable.
+var SchemeGroupVersion = schema.GroupVersion{Group: GroupName, Version: "v1alpha1"} //nolint:gochecknoglobals // kubebuilder-required package-level scheme registration variable.
 
 // SchemeBuilder is used to add go types to the GroupVersionKind scheme.
 var SchemeBuilder = runtime.NewSchemeBuilder(addKnownTypes) //nolint:gochecknoglobals // kubebuilder-required package-level scheme registration variable.
