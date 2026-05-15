@@ -57,7 +57,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
-      - run: helm plugin install https://github.com/helm-unittest/helm-unittest
+      - run: helm plugin install --verify=false https://github.com/helm-unittest/helm-unittest
       - run: helm lint charts/kilo-clustermesh-operator --strict
       - run: helm unittest charts/kilo-clustermesh-operator
 
