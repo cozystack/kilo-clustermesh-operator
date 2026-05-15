@@ -33,9 +33,9 @@ spec:
           image: "{{ .Values.image.repository }}:{{ include "kilo-clustermesh-operator.imageTag" . }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
-            - "--namespace={{ .Release.Namespace }}"
             - "--leader-elect={{ .Values.leaderElect }}"
             - "--metrics-bind-address={{ .Values.metricsBindAddress }}"
+            - "--metrics-secure={{ .Values.metricsSecure }}"
             - "--health-probe-bind-address={{ .Values.healthProbeBindAddress }}"
           securityContext:
             runAsNonRoot: true

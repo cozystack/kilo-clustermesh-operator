@@ -9,6 +9,7 @@ replicaCount: 1
 leaderElect: true
 
 metricsBindAddress: ":8080"
+metricsSecure: false
 healthProbeBindAddress: ":8081"
 
 resources:
