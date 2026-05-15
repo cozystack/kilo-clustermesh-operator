@@ -1,4 +1,4 @@
-FROM docker.io/library/golang:1.26@sha256:313faae491b410a35402c05d35e7518ae99103d957308e940e1ae2cfa0aac29b AS builder
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.26@sha256:313faae491b410a35402c05d35e7518ae99103d957308e940e1ae2cfa0aac29b AS builder
 ARG TARGETOS TARGETARCH
 ARG VERSION=dev
 ARG REVISION=unknown
