@@ -30,12 +30,12 @@ func TestAddToScheme(t *testing.T) {
 	s := runtime.NewScheme()
 	require.NoError(t, AddToScheme(s))
 
-	gvk := schema.GroupVersionKind{Group: "kilo.squat.ai", Version: "v1alpha1", Kind: "Peer"}
+	gvk := schema.GroupVersionKind{Group: GroupName, Version: "v1alpha1", Kind: "Peer"}
 	obj, err := s.New(gvk)
 	require.NoError(t, err)
 	assert.IsType(t, &Peer{}, obj)
 
-	listGVK := schema.GroupVersionKind{Group: "kilo.squat.ai", Version: "v1alpha1", Kind: "PeerList"}
+	listGVK := schema.GroupVersionKind{Group: GroupName, Version: "v1alpha1", Kind: "PeerList"}
 	listObj, err := s.New(listGVK)
 	require.NoError(t, err)
 	assert.IsType(t, &PeerList{}, listObj)
