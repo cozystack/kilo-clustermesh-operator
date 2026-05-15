@@ -140,6 +140,7 @@ linters:
           - revive
           - gochecknoglobals
           - noinlineerr
+          - goconst
         path: _test\.go
       - linters:
           - err113
