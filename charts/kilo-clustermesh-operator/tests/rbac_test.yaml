@@ -178,6 +178,20 @@ tests:
               - create
               - patch
 
+  - it: Role should have rules for events.k8s.io events
+    template: role.yaml
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - events.k8s.io
+            resources:
+              - events
+            verbs:
+              - create
+              - patch
+
   - it: RoleBinding should reference correct ServiceAccount
     template: rolebinding.yaml
     release:
