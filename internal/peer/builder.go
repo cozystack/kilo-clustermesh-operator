@@ -157,5 +157,5 @@ func buildDNSOrIP(host string) kilov1alpha1.DNSOrIP {
 		return kilov1alpha1.DNSOrIP{IP: cleanHost}
 	}
 
-	return kilov1alpha1.DNSOrIP{DNS: host}
+	return kilov1alpha1.DNSOrIP{DNS: cleanHost}
 }

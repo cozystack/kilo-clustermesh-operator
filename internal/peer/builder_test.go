@@ -267,3 +267,25 @@ func TestParseEndpoint_InvalidFormat(t *testing.T) {
 	require.NotNil(t, got)
 	assert.Nil(t, got.Spec.Endpoint, "unparseable endpoint must be silently skipped")
 }
+
+func TestBuildPeer_BracketedDNSEndpoint(t *testing.T) {
+	t.Parallel()
+
+	// A bracketed DNS name like [dns.example.com]:51820 is unusual but valid input
+	// for net.JoinHostPort. buildDNSOrIP must strip the brackets and return the
+	// clean hostname — not "[dns.example.com]" — in the DNS field.
+	annotations := baseAnnotations()
+	annotations[kilonode.AnnotationForceEndpoint] = "[dns.example.com]:51820"
+
+	node := testNode("worker-1", testPodCIDR, annotations)
+
+	got, err := peer.BuildPeer("my-mesh", "cluster-a", node)
+
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.NotNil(t, got.Spec.Endpoint)
+	assert.Equal(t, uint32(51820), got.Spec.Endpoint.Port)
+	assert.Equal(t, "dns.example.com", got.Spec.Endpoint.DNS,
+		"brackets must be stripped from the DNS field; got %q", got.Spec.Endpoint.DNS)
+	assert.Empty(t, got.Spec.Endpoint.IP)
+}
