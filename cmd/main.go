@@ -33,6 +33,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -101,7 +102,7 @@ func run() error {
 		return errors.Wrap(err, "building cluster registry")
 	}
 
-	mgr, err := newManager(cfg, &opts)
+	mgr, err := newManager(cfg, &opts, namespace)
 	if err != nil {
 		return err
 	}
@@ -238,7 +239,7 @@ func mergeClusterSpecs(meshes []kilov1alpha1.ClusterMesh) kilov1alpha1.ClusterMe
 	return merged
 }
 
-func newManager(cfg *rest.Config, opts *runtimeOpts) (manager.Manager, error) {
+func newManager(cfg *rest.Config, opts *runtimeOpts, namespace string) (manager.Manager, error) {
 	var tlsOpts []func(*tls.Config)
 
 	disableHTTP2 := func(c *tls.Config) {
@@ -282,6 +283,17 @@ func newManager(cfg *rest.Config, opts *runtimeOpts) (manager.Manager, error) {
 		HealthProbeBindAddress: opts.probeAddr,
 		LeaderElection:         opts.enableLeaderElection,
 		LeaderElectionID:       leaderElectionID,
+		// The manager's cache only watches namespaced types we own
+		// (ClusterMesh + Secret); restrict it to the operator's own
+		// namespace so we don't need cluster-wide list/watch RBAC.
+		// Cluster-scoped resources (Peers, Nodes, CRDs, Leases) are
+		// accessed via the multicluster registry or direct API calls,
+		// not the manager cache.
+		Cache: cache.Options{
+			DefaultNamespaces: map[string]cache.Config{
+				namespace: {},
+			},
+		},
 	})
 
 	return mgr, errors.Wrap(err, "creating manager")
