@@ -32,7 +32,7 @@ import (
 )
 
 // BuildPeer constructs a Peer object from a validated Node.
-// The Peer's allowedIPs = node's PodCIDRs[0] + wireguard-ip annotation.
+// The Peer's allowedIPs = node's PodCIDRs[0] + /32 (or /128) host route derived from the wireguard-ip annotation.
 func BuildPeer(meshName, sourceCluster string, node *corev1.Node) (*kilov1alpha1.Peer, error) {
 	pubKey := node.Annotations[kilonode.AnnotationPublicKey]
 	if pubKey == "" {
