@@ -78,6 +78,46 @@ func TestBuildPeer_HappyPath(t *testing.T) {
 	assert.Equal(t, "203.0.113.1", got.Spec.Endpoint.IP)
 }
 
+func TestBuildPeer_CozystackStyleWGAnnotation(t *testing.T) {
+	t.Parallel()
+
+	// cozystack-patched Kilo writes the wireguard-ip annotation as
+	// "<host-ip>/<wireguard-subnet-mask>" (e.g. "100.66.0.3/16"), not as a
+	// /32 host route. BuildPeer must still emit a /32 (resp. /128) host
+	// route in AllowedIPs so that each peer terminates traffic for exactly
+	// one WireGuard IP — otherwise every peer would claim the entire
+	// wireguard subnet and break routing.
+	annotations := map[string]string{
+		kilonode.AnnotationPublicKey:   testPubKey,
+		kilonode.AnnotationWireguardIP: "100.66.0.3/16",
+	}
+
+	node := testNode("worker-1", testPodCIDR, annotations)
+
+	got, err := peer.BuildPeer("my-mesh", "cluster-a", node)
+
+	require.NoError(t, err)
+	require.NotNil(t, got)
+
+	assert.Equal(t, []string{testPodCIDR, "100.66.0.3/32"}, got.Spec.AllowedIPs)
+}
+
+func TestBuildPeer_InvalidWireguardIP(t *testing.T) {
+	t.Parallel()
+
+	annotations := map[string]string{
+		kilonode.AnnotationPublicKey:   testPubKey,
+		kilonode.AnnotationWireguardIP: "not-a-cidr",
+	}
+
+	node := testNode("worker-1", testPodCIDR, annotations)
+
+	got, err := peer.BuildPeer("my-mesh", "cluster-a", node)
+
+	require.Error(t, err)
+	assert.Nil(t, got)
+}
+
 func TestBuildPeer_MissingPublicKey(t *testing.T) {
 	t.Parallel()
 

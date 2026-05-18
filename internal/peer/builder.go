@@ -27,6 +27,7 @@ import (
 
 	v1alpha1 "github.com/squat/kilo-clustermesh-operator/api/v1alpha1"
 	"github.com/squat/kilo-clustermesh-operator/internal/kilonode"
+	"github.com/squat/kilo-clustermesh-operator/internal/netutil"
 	kilov1alpha1 "github.com/squat/kilo-clustermesh-operator/pkg/kilo/v1alpha1"
 )
 
@@ -43,7 +44,15 @@ func BuildPeer(meshName, sourceCluster string, node *corev1.Node) (*kilov1alpha1
 		return nil, errors.Newf("node %q has no wireguard-ip annotation", node.Name)
 	}
 
-	allowedIPs := []string{node.Spec.PodCIDRs[0], wgIP}
+	// The annotation may carry the wireguard subnet mask (cozystack-Kilo) or a
+	// /32 host route (upstream Kilo). In AllowedIPs each peer must claim only
+	// its own host IP, so normalise to /32 (resp. /128).
+	hostIP, _, err := netutil.ParseHostInCIDR(wgIP)
+	if err != nil {
+		return nil, errors.Wrapf(err, "node %q has invalid wireguard-ip annotation %q", node.Name, wgIP)
+	}
+
+	allowedIPs := []string{node.Spec.PodCIDRs[0], netutil.HostRoute(hostIP)}
 
 	peer := &kilov1alpha1.Peer{
 		ObjectMeta: metav1.ObjectMeta{

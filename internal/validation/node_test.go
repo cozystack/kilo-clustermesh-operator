@@ -93,9 +93,9 @@ func TestValidateNode(t *testing.T) {
 			wantReason:  validation.ReasonNoWireguardIP,
 		},
 		{
-			name: "wireguard IP not /32",
+			name: "wireguard IP unparseable",
 			node: makeNode("node-1", []string{"10.0.1.0/24"}, map[string]string{
-				kilonode.AnnotationWireguardIP: "10.4.0.0/24",
+				kilonode.AnnotationWireguardIP: "not-a-cidr",
 				kilonode.AnnotationPublicKey:   "dGVzdGtleQo=",
 			}),
 			entry:       baseEntry,
@@ -103,9 +103,29 @@ func TestValidateNode(t *testing.T) {
 			wantReason:  validation.ReasonWGIPInvalid,
 		},
 		{
+			name: "wireguard IP with subnet mask (cozystack-Kilo style)",
+			node: makeNode("node-1", []string{"10.0.1.0/24"}, map[string]string{
+				kilonode.AnnotationWireguardIP: "10.4.0.1/24",
+				kilonode.AnnotationPublicKey:   "dGVzdGtleQo=",
+			}),
+			entry:       baseEntry,
+			wantSkipped: false,
+		},
+		{
 			name: "wireguard IP outside wireguardCIDR",
 			node: makeNode("node-1", []string{"10.0.1.0/24"}, map[string]string{
 				kilonode.AnnotationWireguardIP: "10.5.0.1/32",
+				kilonode.AnnotationPublicKey:   "dGVzdGtleQo=",
+			}),
+			entry:       baseEntry,
+			wantSkipped: true,
+			wantReason:  validation.ReasonWGIPOutOfRange,
+		},
+		{
+			name: "wireguard IP host outside but network overlaps",
+			node: makeNode("node-1", []string{"10.0.1.0/24"}, map[string]string{
+				// 10.5.0.1/16 → host 10.5.0.1 is outside 10.4.0.0/24
+				kilonode.AnnotationWireguardIP: "10.5.0.1/16",
 				kilonode.AnnotationPublicKey:   "dGVzdGtleQo=",
 			}),
 			entry:       baseEntry,

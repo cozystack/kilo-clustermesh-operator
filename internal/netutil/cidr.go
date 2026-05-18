@@ -58,6 +58,28 @@ func IsHostRoute(n *net.IPNet) bool {
 	return ones == bits
 }
 
+// ParseHostInCIDR parses a CIDR string and returns both the host IP and the
+// masked network. Unlike ParseCIDR, this preserves the host bits — useful for
+// annotations that encode a node's address as <host>/<subnet-mask>, e.g.
+// cozystack-patched Kilo writes "100.66.0.3/16".
+func ParseHostInCIDR(s string) (net.IP, *net.IPNet, error) {
+	ip, network, err := net.ParseCIDR(s)
+	if err != nil {
+		return nil, nil, errors.Wrapf(err, "invalid CIDR %q", s)
+	}
+
+	return ip, network, nil
+}
+
+// HostRoute returns the /32 (IPv4) or /128 (IPv6) host route for ip.
+func HostRoute(ip net.IP) string {
+	if ip.To4() != nil {
+		return ip.String() + "/32"
+	}
+
+	return ip.String() + "/128"
+}
+
 // lastAddr returns the last (broadcast) address of a CIDR.
 func lastAddr(n *net.IPNet) net.IP {
 	last := make(net.IP, len(n.IP))

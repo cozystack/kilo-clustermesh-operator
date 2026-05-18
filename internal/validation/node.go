@@ -94,18 +94,15 @@ func validateWireguardIP(node *corev1.Node, entry *v1alpha1.ClusterEntry) (bool,
 		)
 	}
 
-	wgNet, err := netutil.ParseCIDR(wgIP)
+	// The annotation may carry any prefix length. Upstream Kilo writes a /32
+	// host route ("10.4.0.1/32"); the cozystack-patched Kilo writes the host
+	// IP with the wireguard subnet mask ("100.66.0.3/16"). Both are accepted;
+	// only the host IP is checked against the cluster's wireguardCIDR.
+	hostIP, _, err := netutil.ParseHostInCIDR(wgIP)
 	if err != nil {
 		return true, ReasonWGIPInvalid, fmt.Sprintf(
 			"node %q annotation %q value %q is not a valid CIDR: %v",
 			node.Name, kilonode.AnnotationWireguardIP, wgIP, err,
-		)
-	}
-
-	if !netutil.IsHostRoute(wgNet) {
-		return true, ReasonWGIPInvalid, fmt.Sprintf(
-			"node %q annotation %q value %q is not a host route (/32 or /128)",
-			node.Name, kilonode.AnnotationWireguardIP, wgIP,
 		)
 	}
 
@@ -116,7 +113,7 @@ func validateWireguardIP(node *corev1.Node, entry *v1alpha1.ClusterEntry) (bool,
 		)
 	}
 
-	if !netutil.CIDRContains(wgCIDR, wgNet) {
+	if !wgCIDR.Contains(hostIP) {
 		return true, ReasonWGIPOutOfRange, fmt.Sprintf(
 			"node %q WireGuard IP %q is not within cluster WireguardCIDR %q",
 			node.Name, wgIP, entry.WireguardCIDR,
