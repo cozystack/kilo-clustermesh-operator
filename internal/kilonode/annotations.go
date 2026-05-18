@@ -19,7 +19,11 @@ package kilonode
 
 const (
 	// AnnotationWireguardIP is the node annotation containing the WireGuard interface IP.
-	// Value format: "10.4.0.1/32" (must be a host route).
+	// Two formats are accepted:
+	//   - "<ip>/32" (upstream Kilo): host route, e.g. "10.4.0.1/32"
+	//   - "<ip>/<subnet-mask>" (cozystack-Kilo): subnet-masked address, e.g. "100.66.0.3/16"
+	// In both cases the host part of the address is extracted and normalised to a /32 (or /128)
+	// when building WireGuard AllowedIPs for the peer.
 	AnnotationWireguardIP = "kilo.squat.ai/wireguard-ip"
 
 	// AnnotationPublicKey is the node annotation containing the WireGuard public key.
