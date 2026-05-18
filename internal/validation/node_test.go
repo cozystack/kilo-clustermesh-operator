@@ -208,6 +208,39 @@ func TestFindDuplicateWGIPs(t *testing.T) {
 			},
 			wantDuplicates: map[string]validation.NodeSkipReason{},
 		},
+		{
+			// Same host IP with different prefix lengths must be detected as duplicate.
+			// cozystack-Kilo writes "10.4.0.1/16"; upstream Kilo writes "10.4.0.1/32".
+			// Both result in AllowedIPs = 10.4.0.1/32, so they conflict.
+			name: "same host IP different prefix lengths is a duplicate",
+			nodes: []*corev1.Node{
+				makeNode("node-1", nil, map[string]string{kilonode.AnnotationWireguardIP: "10.4.0.1/16"}),
+				makeNode("node-2", nil, map[string]string{kilonode.AnnotationWireguardIP: "10.4.0.1/32"}),
+			},
+			wantDuplicates: map[string]validation.NodeSkipReason{
+				"node-2": validation.ReasonWGIPDuplicate,
+			},
+		},
+		{
+			// Sanity check: different host IPs with same prefix length must not collide.
+			name: "different host IPs are not duplicates",
+			nodes: []*corev1.Node{
+				makeNode("node-1", nil, map[string]string{kilonode.AnnotationWireguardIP: "10.4.0.1/32"}),
+				makeNode("node-2", nil, map[string]string{kilonode.AnnotationWireguardIP: "10.4.0.2/32"}),
+			},
+			wantDuplicates: map[string]validation.NodeSkipReason{},
+		},
+		{
+			// Invalid annotation must not collide with a valid annotation that happens
+			// to share no parseable IP. Invalid values fall back to raw-string keying
+			// so they can still detect identical-invalid copies but never match a valid IP.
+			name: "invalid annotation does not match valid annotation",
+			nodes: []*corev1.Node{
+				makeNode("node-1", nil, map[string]string{kilonode.AnnotationWireguardIP: "not-an-ip"}),
+				makeNode("node-2", nil, map[string]string{kilonode.AnnotationWireguardIP: "10.4.0.1/32"}),
+			},
+			wantDuplicates: map[string]validation.NodeSkipReason{},
+		},
 	}
 
 	for _, testCase := range tests {

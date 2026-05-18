@@ -135,11 +135,17 @@ func validatePublicKey(node *corev1.Node) (bool, NodeSkipReason, string) {
 }
 
 // FindDuplicateWGIPs returns the names of nodes that have duplicate
-// kilo.squat.ai/wireguard-ip annotation values. The first node with
-// a given IP is kept; subsequent duplicates are returned as a map of
-// node name to NodeSkipReason.
+// kilo.squat.ai/wireguard-ip annotation values. Two annotations are
+// considered duplicates when they resolve to the same host IP, regardless
+// of the prefix length used (e.g. "10.4.0.1/16" and "10.4.0.1/32" are the
+// same host IP and therefore conflict). The first node with a given host IP
+// is kept; subsequent nodes with the same host IP are returned as duplicates.
+//
+// If an annotation cannot be parsed as a CIDR, the raw string is used as the
+// dedup key so that identical-invalid copies are still caught, but an invalid
+// annotation never collides with a valid one.
 func FindDuplicateWGIPs(nodes []*corev1.Node) map[string]NodeSkipReason {
-	seen := make(map[string]string) // ip → first node name
+	seen := make(map[string]string) // normalized host IP (or raw string) → first node name
 	duplicates := make(map[string]NodeSkipReason)
 
 	for _, node := range nodes {
@@ -148,12 +154,31 @@ func FindDuplicateWGIPs(nodes []*corev1.Node) map[string]NodeSkipReason {
 			continue
 		}
 
-		if _, exists := seen[wgIP]; exists {
+		// Normalize: extract the host IP so that "10.4.0.1/16" and "10.4.0.1/32"
+		// map to the same key ("10.4.0.1"). Fall back to the raw string when
+		// parsing fails so that identical-invalid annotations still deduplicate.
+		key := normalizeWGIPKey(wgIP)
+
+		if _, exists := seen[key]; exists {
 			duplicates[node.Name] = ReasonWGIPDuplicate
 		} else {
-			seen[wgIP] = node.Name
+			seen[key] = node.Name
 		}
 	}
 
 	return duplicates
+}
+
+// normalizeWGIPKey returns a canonical string for use as a dedup key.
+// It parses the annotation as a CIDR and returns the host IP string so that
+// "10.4.0.1/16" and "10.4.0.1/32" both map to "10.4.0.1". When parsing
+// fails the raw annotation value is returned unchanged, ensuring identical
+// invalid annotations still deduplicate without colliding with valid IPs.
+func normalizeWGIPKey(wgIP string) string {
+	hostIP, _, err := netutil.ParseHostInCIDR(wgIP)
+	if err != nil {
+		return wgIP
+	}
+
+	return hostIP.String()
 }
