@@ -53,7 +53,9 @@ type ClusterEntry struct {
 	PodCIDRs []string `json:"podCIDRs"` //nolint:tagliatelle // "podCIDRs" is the canonical field name; "CIDR" is a well-known acronym
 
 	// WireguardCIDR is the CIDR for Kilo's WireGuard interface (kilo0) addresses.
-	// Each node's kilo.squat.ai/wireguard-ip must be a /32 (or /128) within this CIDR.
+	// Each node's kilo.squat.ai/wireguard-ip must have its host IP within this CIDR.
+	// The annotation may carry any prefix length (e.g. "10.4.0.1/32" upstream Kilo
+	// or "10.4.0.1/16" cozystack-patched Kilo); only the host portion is validated.
 	WireguardCIDR string `json:"wireguardCIDR"`
 
 	// ServiceCIDR is the Kubernetes service network CIDR for this cluster.

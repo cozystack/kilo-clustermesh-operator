@@ -103,6 +103,11 @@ func TestValidateNode(t *testing.T) {
 			wantReason:  validation.ReasonWGIPInvalid,
 		},
 		{
+			// Regression guard: the operator previously rejected annotations with a
+			// prefix length other than /32 (or /128) via an IsHostRoute check. That
+			// check was intentionally dropped to support cozystack-patched Kilo, which
+			// writes the full subnet mask (e.g. "10.4.0.1/24") into the annotation.
+			// Only the host portion of the address is now validated against WireguardCIDR.
 			name: "wireguard IP with subnet mask (cozystack-Kilo style)",
 			node: makeNode("node-1", []string{"10.0.1.0/24"}, map[string]string{
 				kilonode.AnnotationWireguardIP: "10.4.0.1/24",
