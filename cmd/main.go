@@ -57,6 +57,16 @@ const (
 	controllerEventName = "clustermesh-controller"
 )
 
+// version and revision are set at build time via -X linker flags:
+//
+//	-X main.version=${VERSION} -X main.revision=${REVISION}
+//
+// They default to the zero string when not provided (e.g. in local dev builds).
+var (
+	version  string
+	revision string
+)
+
 var (
 	scheme   = runtime.NewScheme()
 	setupLog = ctrl.Log.WithName("setup")
@@ -129,7 +139,12 @@ func run() error {
 		return errors.Wrap(err, "setting up ready check")
 	}
 
-	setupLog.Info("Starting manager", "namespace", namespace, "clusters", registry.Clusters())
+	setupLog.Info("Starting manager",
+		"namespace", namespace,
+		"clusters", registry.Clusters(),
+		"version", version,
+		"revision", revision,
+	)
 
 	if err := mgr.Start(ctx); err != nil {
 		return errors.Wrap(err, "manager exited with error")
