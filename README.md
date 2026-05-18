@@ -48,15 +48,15 @@ spec:
     - name: cluster-a
       local: true
       podCIDRs: ["10.1.0.0/16"]
-      wireguardCIDR: "10.100.0.0/24"
+      wireguardCIDR: "10.200.0.0/24"
       serviceCIDR: "10.96.0.0/12"
     - name: cluster-b
       kubeconfigSecretRef:
         name: cluster-b-kubeconfig
         key: kubeconfig
       podCIDRs: ["10.2.0.0/16"]
-      wireguardCIDR: "10.100.1.0/24"
-      serviceCIDR: "10.96.0.0/12"
+      wireguardCIDR: "10.200.1.0/24"
+      serviceCIDR: "10.112.0.0/12"
 ```
 
 ## ClusterMesh CRD Reference

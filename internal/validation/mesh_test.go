@@ -17,11 +17,16 @@ limitations under the License.
 package validation_test
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/yaml"
 
 	v1alpha1 "github.com/squat/kilo-clustermesh-operator/api/v1alpha1"
 	"github.com/squat/kilo-clustermesh-operator/internal/validation"
@@ -230,4 +235,81 @@ func TestValidateMeshNetworks(t *testing.T) {
 			}
 		})
 	}
+}
+
+// repoRootForValidation returns the repository root by walking up from the
+// directory of the current test file until a go.mod is found.
+// It mirrors the pattern used in internal/containerfile/containerfile_test.go.
+func repoRootForValidation(t *testing.T) string {
+	t.Helper()
+
+	_, callerFile, _, ok := runtime.Caller(0)
+	require.True(t, ok, "runtime.Caller returned no file info")
+
+	dir := filepath.Dir(callerFile)
+
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+
+		parent := filepath.Dir(dir)
+		require.NotEqual(t, parent, dir, "reached filesystem root without finding go.mod")
+
+		dir = parent
+	}
+}
+
+// extractFirstClusterMeshYAML finds the first YAML fenced block in src that
+// contains a ClusterMesh document (identified by "kind: ClusterMesh") and
+// returns its content.
+func extractFirstClusterMeshYAML(src string) (string, bool) {
+	const fence = "```yaml"
+
+	rest := src
+
+	for {
+		start := strings.Index(rest, fence)
+		if start < 0 {
+			return "", false
+		}
+
+		rest = rest[start+len(fence):]
+
+		end := strings.Index(rest, "```")
+		if end < 0 {
+			return "", false
+		}
+
+		block := rest[:end]
+		rest = rest[end+3:]
+
+		if strings.Contains(block, "kind: ClusterMesh") {
+			return block, true
+		}
+	}
+}
+
+// TestREADMEQuickStartManifestIsValid is a regression guard that ensures the
+// ClusterMesh manifest in the Quick Start section of README.md uses
+// non-overlapping CIDRs and would pass ValidateClusterNetworks.
+func TestREADMEQuickStartManifestIsValid(t *testing.T) {
+	t.Parallel()
+
+	root := repoRootForValidation(t)
+	readmePath := filepath.Join(root, "README.md")
+
+	src, err := os.ReadFile(readmePath)
+	require.NoError(t, err, "reading README.md")
+
+	yamlBlock, found := extractFirstClusterMeshYAML(string(src))
+	require.True(t, found, "no ClusterMesh YAML block found in README.md")
+
+	var mesh v1alpha1.ClusterMesh
+	require.NoError(t, yaml.Unmarshal([]byte(yamlBlock), &mesh), "unmarshalling ClusterMesh YAML from README.md")
+
+	require.NotEmpty(t, mesh.Spec.Clusters, "README ClusterMesh spec has no clusters")
+
+	err = validation.ValidateClusterNetworks(mesh.Spec.Clusters)
+	assert.NoError(t, err, "README Quick Start ClusterMesh has overlapping CIDRs")
 }
