@@ -1,5 +1,5 @@
 image:
-  repository: ghcr.io/squat/kilo-clustermesh-operator
+  repository: ghcr.io/cozystack/kilo-clustermesh-operator
   # tag defaults to appVersion when empty
   tag: ""
   pullPolicy: IfNotPresent

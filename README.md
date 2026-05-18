@@ -32,7 +32,6 @@ Container images are published to `ghcr.io/cozystack/kilo-clustermesh-operator` 
 
 ```yaml
 image:
-  repository: ghcr.io/cozystack/kilo-clustermesh-operator
   tag: sha-<commit>
 ```
 
