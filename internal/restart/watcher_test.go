@@ -233,3 +233,39 @@ func TestFingerprint_NoMeshes(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, fp)
 }
+
+func TestReconcile_NilCancel_NoPanic(t *testing.T) {
+	t.Parallel()
+
+	// This test verifies that Reconcile does not panic when Cancel is nil.
+	// A bootstrap ChangeWatcher (used only for fingerprint computation) has no
+	// Cancel set; if any future code path calls Reconcile on it and the
+	// fingerprint differs from the start fingerprint, the nil dereference must
+	// be guarded.
+	scheme := testScheme(t)
+
+	mesh := &v1alpha1.ClusterMesh{
+		ObjectMeta: metav1.ObjectMeta{Name: "mesh1", Namespace: "default"},
+		Spec: v1alpha1.ClusterMeshSpec{
+			Clusters: []v1alpha1.ClusterEntry{
+				{Name: "local", Local: true, PodCIDRs: []string{"10.0.0.0/16"}, WireguardCIDR: "10.4.0.0/16"},
+			},
+		},
+	}
+
+	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mesh).Build()
+
+	// Set StartFingerprint to a value that will not match the freshly computed
+	// fingerprint, forcing the fingerprint-changed branch to execute.
+	watcher := &ChangeWatcher{
+		Client:           fc,
+		Cancel:           nil, // intentionally nil
+		Namespace:        "default",
+		Log:              testLogger(),
+		StartFingerprint: "this-will-not-match",
+	}
+
+	result, err := watcher.Reconcile(context.Background(), reconcile.Request{})
+	require.NoError(t, err)
+	assert.Equal(t, reconcile.Result{}, result)
+}
