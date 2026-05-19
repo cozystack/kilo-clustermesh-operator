@@ -31,7 +31,17 @@ const (
 
 	// AnnotationForceEndpoint is the node annotation specifying the WireGuard endpoint.
 	// Value format: "203.0.113.1:51820" or "node.example.com:51820".
+	// Kilo itself reads this annotation to override intra-cluster endpoint
+	// detection; the clustermesh operator uses it as a fallback when
+	// AnnotationClustermeshEndpoint is absent.
 	AnnotationForceEndpoint = "kilo.squat.ai/force-endpoint"
+
+	// AnnotationClustermeshEndpoint is the operator-specific node annotation
+	// for cross-cluster mesh endpoints. Takes precedence over
+	// AnnotationForceEndpoint. Decoupled from Kilo's own force-endpoint to
+	// avoid side-effects on intra-cluster topology (e.g. "cross" granularity).
+	// Value format: "203.0.113.1:51820" or "node.example.com:51820".
+	AnnotationClustermeshEndpoint = "kilo.squat.ai/clustermesh-endpoint"
 
 	// AnnotationLocation is the node annotation for Kilo's location grouping.
 	AnnotationLocation = "kilo.squat.ai/location"
