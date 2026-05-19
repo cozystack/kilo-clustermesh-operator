@@ -13,7 +13,7 @@ Each `ClusterMesh` resource declares two or more participating clusters, includi
 - Kubernetes 1.28+ in every participating cluster
 - [Kilo](https://github.com/squat/kilo) installed in each cluster. Both upstream and the cozystack-patched build are supported; the operator accepts WireGuard IP annotations in either `<host>/32` (upstream) or `<host>/<subnet-mask>` (cozystack `cross` granularity) form.
 - Each remote cluster's apiserver must be reachable from the cluster where the controller runs.
-- Each node that participates in the mesh must expose a UDP/51820 endpoint that is reachable from every other cluster (see [Per-node configuration](#per-node-configuration) below).
+- Each node that participates in the mesh must expose its WireGuard UDP port (default `51820`, configurable per-cluster via `wireguardPort`) on a network address reachable from every other cluster (see [Per-node configuration](#per-node-configuration) below).
 - Helm 3.x (for chart-based installation)
 
 ## Quick Start
@@ -198,23 +198,27 @@ Reference the Secret in the `ClusterMesh` spec via `kubeconfigSecretRef`.
 
 ## Per-node configuration
 
-The operator copies each remote node's `kilo.squat.ai/force-endpoint` annotation into the Peer's `endpoint` field. **This annotation is the only source the operator uses to determine where to send WireGuard packets for that node.** Kilo's auto-discovered `kilo.squat.ai/endpoint` (which usually carries an internal IP) is intentionally ignored — it is rarely reachable from another cluster.
+For every node that participates in the mesh, the operator resolves a WireGuard endpoint from the following sources, in priority order. The first non-empty source wins:
 
-Every node that should be reachable cross-cluster needs the annotation:
+1. **`kilo.squat.ai/clustermesh-endpoint` annotation** (operator-specific, preferred). Decoupled from Kilo's own behaviour, so setting it does not affect intra-cluster routing.
+2. **`kilo.squat.ai/force-endpoint` annotation** (legacy fallback). Also consumed by Kilo itself, so it overrides intra-cluster peer endpoints as well — usually acceptable, but it can introduce a NAT hop for same-cluster traffic.
+3. **First `ExternalIP` from `Node.Status.Addresses`** (zero-config fallback), combined with the `wireguardPort` declared in the `ClusterEntry` (default `51820`). IPv4 is preferred over IPv6. This path is useful on platforms that publish public IPs into the Node status automatically (e.g. cloud-managed clusters, or Talos with the Oracle Cloud platform driver providing 1:1 NAT addresses).
+
+A node with **no resolvable source** is skipped with reason `NodeNoEndpoint` and counted in `SkippedNodes`. A node whose `clustermesh-endpoint` or `force-endpoint` annotation is **present but malformed** is skipped with reason `NodeEndpointInvalid` — bad values surface immediately instead of producing a Peer without an endpoint.
+
+To set the preferred operator-specific annotation explicitly:
 
 ```bash
 kubectl annotate node <node-name> \
-  kilo.squat.ai/force-endpoint=<public-ip-or-dns>:51820 \
+  kilo.squat.ai/clustermesh-endpoint=<public-ip-or-dns>:<port> \
   --overwrite
 ```
 
-`<public-ip-or-dns>` must be the address (and port) on which the node's WireGuard listener is reachable from every other cluster — typically a public IP, a NAT-mapped address, or a load-balancer endpoint. The same annotation also overrides Kilo's intra-cluster peer endpoint, so traffic between nodes of the same cluster will be routed through the advertised endpoint as well; this is usually acceptable but can add a NAT hop. See [Possible improvements](#possible-improvements) for a planned dedicated annotation.
-
-Nodes without a reachable public endpoint can be left unannotated; the operator will still register them as peers (their pod CIDR remains part of the mesh routing table) but the peer will have no endpoint, so traffic targeted at it will be dropped at the WireGuard layer. Use this only when intra-cluster forwarding via another node is in place.
+To override the default WireGuard port for an entire cluster (when relying on the ExternalIP fallback), set `wireguardPort` on the corresponding `ClusterEntry` in the `ClusterMesh` spec.
 
 ### Triggering a reconcile after annotation changes
 
-The operator's manager cache watches `ClusterMesh` and `Secret` objects only; it does **not** watch `Node` annotations on either the local or remote clusters. After changing a node's `kilo.squat.ai/force-endpoint` (or any other Kilo annotation that affects peer construction), nudge the operator with a no-op write to the `ClusterMesh` resource:
+The operator's manager cache watches `ClusterMesh` and `Secret` objects only; it does **not** watch `Node` annotations on either the local or remote clusters. After changing a node's endpoint annotation (or any other Kilo annotation that affects peer construction), nudge the operator with a no-op write to the `ClusterMesh` resource:
 
 ```bash
 kubectl --namespace kilo-system annotate clustermesh <name> \
@@ -233,7 +237,7 @@ The controller runs a single reconciliation loop triggered by changes to `Cluste
 1. For each cluster in the spec, build a client. The local cluster uses the in-cluster config; remote clusters use the kubeconfig stored in the referenced Secret.
 2. For every cluster, list all `Node` objects and validate each node's `Spec.PodCIDRs` and `kilo.squat.ai/wireguard-ip` annotation against the declared `podCIDRs` and `wireguardCIDR`.
 3. For each pair (sourceCluster, targetCluster), construct per-node Kilo `Peer` objects on the targetCluster representing each source node's pod CIDR and WireGuard host IP. If `serviceCIDR` or `additionalCIDRs` are set, an additional anchor `Peer` is created carrying those cluster-wide CIDRs.
-4. The Peer endpoint is taken from each source node's `kilo.squat.ai/force-endpoint` annotation. Nodes without that annotation produce a Peer without an endpoint.
+4. The Peer endpoint is resolved via the [per-node endpoint chain](#per-node-configuration): `kilo.squat.ai/clustermesh-endpoint` → `kilo.squat.ai/force-endpoint` → first ExternalIP in `Node.Status.Addresses`. Nodes without any resolvable source are skipped.
 5. Delete stale `Peer` objects on each cluster that no longer correspond to any remote node.
 6. Update `ClusterMeshStatus` with per-cluster peer counts and set the `Ready` condition.
 
@@ -247,8 +251,7 @@ The operator's manager cache is scoped to the operator's own namespace; cluster-
 
 The following items have been deliberately deferred. Issues and PRs welcome.
 
-- **Dedicated cross-cluster endpoint annotation.** The operator currently reads `kilo.squat.ai/force-endpoint`, which is also consumed by Kilo's intra-cluster mesh. As a side effect, annotating a node with its public endpoint causes Kilo to route same-cluster WireGuard traffic through the public address too. Introducing a separate annotation (e.g. `kilo-clustermesh.io/public-endpoint`) would let an operator pick up the public address while leaving Kilo's `force-endpoint` (and intra-cluster routing) untouched.
-- **Watch `Node` annotation changes.** The reconciler currently only observes `ClusterMesh` and `Secret` objects. Changes to relevant node annotations (`force-endpoint`, `wireguard-ip`, `public-key`) require a manual reconcile trigger. Watching Node objects on every cluster — with predicates filtering for the relevant annotation keys — would make endpoint changes propagate automatically.
+- **Watch `Node` annotation changes.** The reconciler currently only observes `ClusterMesh` and `Secret` objects. Changes to relevant node annotations (`clustermesh-endpoint`, `force-endpoint`, `wireguard-ip`, `public-key`) require a manual reconcile trigger. Watching Node objects on every cluster — with predicates filtering for the relevant annotation keys — would make endpoint changes propagate automatically.
 - **Per-node skip annotation.** Today a node without a reachable endpoint is registered as a Peer without an endpoint, which results in silently dropped traffic. An explicit opt-out annotation (e.g. `kilo-clustermesh.io/skip=true`) and a corresponding `Skipped` reason in status would make intent visible.
 
 ## Contributing
