@@ -199,10 +199,11 @@ See [./docs/architecture.md](./docs/architecture.md) for the full reconciliation
 | [Configuration](./docs/configuration.md) | Full `ClusterMesh` CRD reference, field constraints, status conditions |
 | [Per-node setup](./docs/per-node-setup.md) | Endpoint resolution chain, node annotations, WireGuard IP requirements |
 | [Troubleshooting](./docs/troubleshooting.md) | Common failure modes, skip reasons, CIDR overlap, stale peers |
+| [Known Gaps](./docs/known-gaps.md) | Outstanding work and proposal divergences (for contributors) |
 
 ## Project Status
 
-Alpha — the API is functional and in active use within Cozystack, but the CRD version is `v1alpha1` and breaking changes may occur before a stable release.
+Alpha — the API is functional and in active use within Cozystack, but the CRD version is `v1alpha1` and breaking changes may occur before a stable release. See [docs/known-gaps.md](./docs/known-gaps.md) for outstanding work and divergences from the upstream proposal.
 
 ## License
 
