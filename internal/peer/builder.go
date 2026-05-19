@@ -54,6 +54,11 @@ func BuildPeer(meshName string, entry *v1alpha1.ClusterEntry, node *corev1.Node)
 
 	allowedIPs := []string{node.Spec.PodCIDRs[0], netutil.HostRoute(hostIP)}
 
+	endpoint, err := resolvePeerEndpoint(node, entry.WireguardPort)
+	if err != nil {
+		return nil, err
+	}
+
 	peer := &kilov1alpha1.Peer{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   Name(meshName, entry.Name, node.Name),
@@ -62,10 +67,9 @@ func BuildPeer(meshName string, entry *v1alpha1.ClusterEntry, node *corev1.Node)
 		Spec: kilov1alpha1.PeerSpec{
 			AllowedIPs: allowedIPs,
 			PublicKey:  pubKey,
+			Endpoint:   endpoint,
 		},
 	}
-
-	applyEndpointFromAnnotation(peer, node.Annotations[kilonode.AnnotationForceEndpoint])
 
 	return peer, nil
 }
@@ -73,14 +77,21 @@ func BuildPeer(meshName string, entry *v1alpha1.ClusterEntry, node *corev1.Node)
 // BuildAnchorPeer constructs a Peer that carries cluster-wide CIDRs not covered
 // by per-node Peers (e.g., serviceCIDR, additionalCIDRs).
 // It uses the first validated node's public key and endpoint as the anchor point.
-// Returns nil when there are no cluster-wide CIDRs to advertise.
+// Returns nil when there are no cluster-wide CIDRs to advertise, or when the
+// anchor node has no resolvable endpoint (an anchor without an endpoint cannot
+// terminate cross-cluster traffic for those CIDRs).
 func BuildAnchorPeer(meshName string, entry *v1alpha1.ClusterEntry, anchorNode *corev1.Node) *kilov1alpha1.Peer {
 	anchorCIDRs := collectAnchorCIDRs(entry)
 	if len(anchorCIDRs) == 0 {
 		return nil
 	}
 
-	peer := &kilov1alpha1.Peer{
+	endpoint, err := resolvePeerEndpoint(anchorNode, entry.WireguardPort)
+	if err != nil {
+		return nil
+	}
+
+	return &kilov1alpha1.Peer{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   Name(meshName, entry.Name, "anchor"),
 			Labels: Labels(meshName, entry.Name),
@@ -88,12 +99,9 @@ func BuildAnchorPeer(meshName string, entry *v1alpha1.ClusterEntry, anchorNode *
 		Spec: kilov1alpha1.PeerSpec{
 			AllowedIPs: anchorCIDRs,
 			PublicKey:  anchorNode.Annotations[kilonode.AnnotationPublicKey],
+			Endpoint:   endpoint,
 		},
 	}
-
-	applyEndpointFromAnnotation(peer, anchorNode.Annotations[kilonode.AnnotationForceEndpoint])
-
-	return peer
 }
 
 // collectAnchorCIDRs returns the cluster-wide CIDRs for an anchor peer.
@@ -109,19 +117,26 @@ func collectAnchorCIDRs(entry *v1alpha1.ClusterEntry) []string {
 	return cidrs
 }
 
-// applyEndpointFromAnnotation parses the endpoint annotation and sets it on the
-// peer if parsing succeeds. A missing or unparseable annotation is silently ignored.
-func applyEndpointFromAnnotation(peer *kilov1alpha1.Peer, endpointStr string) {
-	if endpointStr == "" {
-		return
+// resolvePeerEndpoint resolves a node's WireGuard endpoint via the kilonode
+// fallback chain (clustermesh-endpoint annotation → force-endpoint annotation
+// → ExternalIP) and parses the result into a PeerEndpoint. A present-but-
+// malformed annotation, or a node with no source at all, surfaces as an error.
+func resolvePeerEndpoint(node *corev1.Node, fallbackPort uint16) (*kilov1alpha1.PeerEndpoint, error) {
+	endpointStr, found, err := kilonode.ResolveEndpoint(node, fallbackPort)
+	if err != nil {
+		return nil, errors.Wrapf(err, "resolving endpoint for node %q", node.Name)
+	}
+
+	if !found {
+		return nil, errors.Newf("node %q has no resolvable endpoint", node.Name)
 	}
 
 	endpoint, err := parseEndpoint(endpointStr)
 	if err != nil {
-		return
+		return nil, errors.Wrapf(err, "parsing resolved endpoint %q for node %q", endpointStr, node.Name)
 	}
 
-	peer.Spec.Endpoint = endpoint
+	return endpoint, nil
 }
 
 // parseEndpoint parses "host:port" into a PeerEndpoint.
