@@ -33,7 +33,7 @@ import (
 
 // BuildPeer constructs a Peer object from a validated Node.
 // The Peer's allowedIPs = node's PodCIDRs[0] + /32 (or /128) host route derived from the wireguard-ip annotation.
-func BuildPeer(meshName, sourceCluster string, node *corev1.Node) (*kilov1alpha1.Peer, error) {
+func BuildPeer(meshName string, entry *v1alpha1.ClusterEntry, node *corev1.Node) (*kilov1alpha1.Peer, error) {
 	pubKey := node.Annotations[kilonode.AnnotationPublicKey]
 	if pubKey == "" {
 		return nil, errors.Newf("node %q has no public key annotation", node.Name)
@@ -56,8 +56,8 @@ func BuildPeer(meshName, sourceCluster string, node *corev1.Node) (*kilov1alpha1
 
 	peer := &kilov1alpha1.Peer{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:   Name(meshName, sourceCluster, node.Name),
-			Labels: Labels(meshName, sourceCluster),
+			Name:   Name(meshName, entry.Name, node.Name),
+			Labels: Labels(meshName, entry.Name),
 		},
 		Spec: kilov1alpha1.PeerSpec{
 			AllowedIPs: allowedIPs,
@@ -74,7 +74,7 @@ func BuildPeer(meshName, sourceCluster string, node *corev1.Node) (*kilov1alpha1
 // by per-node Peers (e.g., serviceCIDR, additionalCIDRs).
 // It uses the first validated node's public key and endpoint as the anchor point.
 // Returns nil when there are no cluster-wide CIDRs to advertise.
-func BuildAnchorPeer(meshName, sourceCluster string, entry *v1alpha1.ClusterEntry, anchorNode *corev1.Node) *kilov1alpha1.Peer {
+func BuildAnchorPeer(meshName string, entry *v1alpha1.ClusterEntry, anchorNode *corev1.Node) *kilov1alpha1.Peer {
 	anchorCIDRs := collectAnchorCIDRs(entry)
 	if len(anchorCIDRs) == 0 {
 		return nil
@@ -82,8 +82,8 @@ func BuildAnchorPeer(meshName, sourceCluster string, entry *v1alpha1.ClusterEntr
 
 	peer := &kilov1alpha1.Peer{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:   Name(meshName, sourceCluster, "anchor"),
-			Labels: Labels(meshName, sourceCluster),
+			Name:   Name(meshName, entry.Name, "anchor"),
+			Labels: Labels(meshName, entry.Name),
 		},
 		Spec: kilov1alpha1.PeerSpec{
 			AllowedIPs: anchorCIDRs,

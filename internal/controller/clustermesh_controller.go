@@ -303,7 +303,7 @@ func buildDesiredPeers(meshName string, entry *v1alpha1.ClusterEntry, nodes []*c
 	peers := make([]*kilov1alpha1.Peer, 0, len(nodes)+1)
 
 	for _, node := range nodes {
-		p, err := peer.BuildPeer(meshName, entry.Name, node)
+		p, err := peer.BuildPeer(meshName, entry, node)
 		if err != nil {
 			return nil, errors.Wrapf(err, "building peer for node %q", node.Name)
 		}
@@ -312,7 +312,7 @@ func buildDesiredPeers(meshName string, entry *v1alpha1.ClusterEntry, nodes []*c
 	}
 
 	if len(nodes) > 0 {
-		if anchor := peer.BuildAnchorPeer(meshName, entry.Name, entry, nodes[0]); anchor != nil {
+		if anchor := peer.BuildAnchorPeer(meshName, entry, nodes[0]); anchor != nil {
 			peers = append(peers, anchor)
 		}
 	}

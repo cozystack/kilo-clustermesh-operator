@@ -56,6 +56,17 @@ func baseAnnotations() map[string]string {
 	}
 }
 
+// testEntry returns a minimal ClusterEntry usable in builder tests.
+// The Name matches the legacy "cluster-a" string used by tests for peer name
+// and label assertions; WireguardPort is set to the well-known default so
+// ExternalIP-fallback paths get a deterministic port.
+func testEntry() *v1alpha1.ClusterEntry {
+	return &v1alpha1.ClusterEntry{
+		Name:          "cluster-a",
+		WireguardPort: 51820,
+	}
+}
+
 func TestBuildPeer_HappyPath(t *testing.T) {
 	t.Parallel()
 
@@ -64,7 +75,7 @@ func TestBuildPeer_HappyPath(t *testing.T) {
 
 	node := testNode("worker-1", testPodCIDR, annotations)
 
-	got, err := peer.BuildPeer("my-mesh", "cluster-a", node)
+	got, err := peer.BuildPeer("my-mesh", testEntry(), node)
 
 	require.NoError(t, err)
 	require.NotNil(t, got)
@@ -94,7 +105,7 @@ func TestBuildPeer_CozystackStyleWGAnnotation(t *testing.T) {
 
 	node := testNode("worker-1", testPodCIDR, annotations)
 
-	got, err := peer.BuildPeer("my-mesh", "cluster-a", node)
+	got, err := peer.BuildPeer("my-mesh", testEntry(), node)
 
 	require.NoError(t, err)
 	require.NotNil(t, got)
@@ -112,7 +123,7 @@ func TestBuildPeer_InvalidWireguardIP(t *testing.T) {
 
 	node := testNode("worker-1", testPodCIDR, annotations)
 
-	got, err := peer.BuildPeer("my-mesh", "cluster-a", node)
+	got, err := peer.BuildPeer("my-mesh", testEntry(), node)
 
 	require.Error(t, err)
 	assert.Nil(t, got)
@@ -127,7 +138,7 @@ func TestBuildPeer_MissingPublicKey(t *testing.T) {
 
 	node := testNode("worker-1", testPodCIDR, annotations)
 
-	got, err := peer.BuildPeer("my-mesh", "cluster-a", node)
+	got, err := peer.BuildPeer("my-mesh", testEntry(), node)
 
 	require.Error(t, err)
 	assert.Nil(t, got)
@@ -143,7 +154,7 @@ func TestBuildPeer_MissingWireguardIP(t *testing.T) {
 
 	node := testNode("worker-1", testPodCIDR, annotations)
 
-	got, err := peer.BuildPeer("my-mesh", "cluster-a", node)
+	got, err := peer.BuildPeer("my-mesh", testEntry(), node)
 
 	require.Error(t, err)
 	assert.Nil(t, got)
@@ -155,7 +166,7 @@ func TestBuildPeer_WithoutEndpoint(t *testing.T) {
 
 	node := testNode("worker-1", testPodCIDR, baseAnnotations())
 
-	got, err := peer.BuildPeer("my-mesh", "cluster-a", node)
+	got, err := peer.BuildPeer("my-mesh", testEntry(), node)
 
 	require.NoError(t, err)
 	require.NotNil(t, got)
@@ -170,7 +181,7 @@ func TestBuildPeer_DNSEndpoint(t *testing.T) {
 
 	node := testNode("worker-1", testPodCIDR, annotations)
 
-	got, err := peer.BuildPeer("my-mesh", "cluster-a", node)
+	got, err := peer.BuildPeer("my-mesh", testEntry(), node)
 
 	require.NoError(t, err)
 	require.NotNil(t, got)
@@ -188,7 +199,7 @@ func TestBuildPeer_IPEndpoint(t *testing.T) {
 
 	node := testNode("worker-1", testPodCIDR, annotations)
 
-	got, err := peer.BuildPeer("my-mesh", "cluster-a", node)
+	got, err := peer.BuildPeer("my-mesh", testEntry(), node)
 
 	require.NoError(t, err)
 	require.NotNil(t, got)
@@ -208,7 +219,7 @@ func TestBuildAnchorPeer_WithServiceCIDR(t *testing.T) {
 
 	node := testNode("worker-1", testPodCIDR, baseAnnotations())
 
-	got := peer.BuildAnchorPeer("my-mesh", "cluster-a", entry, node)
+	got := peer.BuildAnchorPeer("my-mesh", entry, node)
 
 	require.NotNil(t, got)
 	assert.Equal(t, peer.Name("my-mesh", "cluster-a", "anchor"), got.Name)
@@ -228,7 +239,7 @@ func TestBuildAnchorPeer_WithAdditionalCIDRs(t *testing.T) {
 
 	node := testNode("worker-1", testPodCIDR, baseAnnotations())
 
-	got := peer.BuildAnchorPeer("my-mesh", "cluster-a", entry, node)
+	got := peer.BuildAnchorPeer("my-mesh", entry, node)
 
 	require.NotNil(t, got)
 	assert.Equal(t, []string{"10.96.0.0/12", "192.168.100.0/24", "172.16.0.0/16"}, got.Spec.AllowedIPs)
@@ -245,7 +256,7 @@ func TestBuildAnchorPeer_NoAnchorCIDRs(t *testing.T) {
 
 	node := testNode("worker-1", testPodCIDR, baseAnnotations())
 
-	got := peer.BuildAnchorPeer("my-mesh", "cluster-a", entry, node)
+	got := peer.BuildAnchorPeer("my-mesh", entry, node)
 
 	assert.Nil(t, got, "must return nil when there are no cluster-wide CIDRs")
 }
@@ -261,7 +272,7 @@ func TestParseEndpoint_InvalidFormat(t *testing.T) {
 
 	node := testNode("worker-1", testPodCIDR, annotations)
 
-	got, err := peer.BuildPeer("my-mesh", "cluster-a", node)
+	got, err := peer.BuildPeer("my-mesh", testEntry(), node)
 
 	require.NoError(t, err, "invalid endpoint annotation must not cause an error")
 	require.NotNil(t, got)
@@ -279,7 +290,7 @@ func TestBuildPeer_BracketedDNSEndpoint(t *testing.T) {
 
 	node := testNode("worker-1", testPodCIDR, annotations)
 
-	got, err := peer.BuildPeer("my-mesh", "cluster-a", node)
+	got, err := peer.BuildPeer("my-mesh", testEntry(), node)
 
 	require.NoError(t, err)
 	require.NotNil(t, got)
