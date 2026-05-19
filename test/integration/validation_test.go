@@ -128,8 +128,8 @@ func TestInvalidNodeWGIP_NodeSkipped(t *testing.T) {
 	// invalid-node-wgip: WireGuard IP NOT within 10.100.0.0/24 (it's in 10.200.0.0/24).
 	invalidNode := makeNode("wgip-invalid-node", "10.1.1.0/24", "10.200.0.10/32", "pubkey-wgip-invalid", "")
 
-	require.NoError(t, globalEnv.localClient.Create(ctx, validNode))
-	require.NoError(t, globalEnv.localClient.Create(ctx, invalidNode))
+	createNode(t, globalEnv.localClient, validNode)
+	createNode(t, globalEnv.localClient, invalidNode)
 
 	t.Cleanup(func() {
 		_ = globalEnv.localClient.Delete(ctx, validNode)
@@ -185,7 +185,7 @@ func TestMissingPublicKey_NodeSkipped(t *testing.T) {
 	// entirely so validatePublicKey skips it.
 	delete(node.Annotations, "kilo.squat.ai/key")
 
-	require.NoError(t, globalEnv.localClient.Create(ctx, node))
+	createNode(t, globalEnv.localClient, node)
 	t.Cleanup(func() { _ = globalEnv.localClient.Delete(ctx, node) })
 
 	mesh := simpleMeshSpec("no-pubkey-mesh", "default")
@@ -232,8 +232,8 @@ func TestDeletion_PeersCleanedUp(t *testing.T) {
 	localNode := makeNode("del-local-node", "10.1.0.0/24", "10.100.0.30/32", "pubkey-del-local", "")
 	remoteNode := makeNode("del-remote-node", "10.2.0.0/24", "10.100.1.30/32", "pubkey-del-remote", "192.0.2.30:51820")
 
-	require.NoError(t, globalEnv.localClient.Create(ctx, localNode))
-	require.NoError(t, globalEnv.remoteClient.Create(ctx, remoteNode))
+	createNode(t, globalEnv.localClient, localNode)
+	createNode(t, globalEnv.remoteClient, remoteNode)
 
 	t.Cleanup(func() {
 		_ = globalEnv.localClient.Delete(ctx, localNode)

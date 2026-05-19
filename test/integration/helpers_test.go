@@ -39,8 +39,17 @@ const (
 	eventuallyInterval = 100 * time.Millisecond
 )
 
+// fallbackExternalIP is the default ExternalIP used by makeNode so that
+// kilonode.ResolveEndpoint always finds a source. Tests that need to exercise
+// the "no resolvable endpoint" path must clear node.Status.Addresses explicitly.
+// The address is from the RFC 5737 documentation range.
+const fallbackExternalIP = "203.0.113.10"
+
 // makeNode builds a corev1.Node with the Kilo annotations required for peering.
-// endpoint may be empty (no kilo.squat.ai/force-endpoint annotation is set).
+// endpoint, when non-empty, is set as the kilo.squat.ai/force-endpoint annotation
+// and takes precedence over the ExternalIP fallback in ResolveEndpoint.
+// A NodeExternalIP is always attached so endpoint resolution succeeds even when
+// no force-endpoint is configured.
 func makeNode(name, podCIDR, wgIP, pubKey, endpoint string) *corev1.Node {
 	annotations := map[string]string{
 		kilonode.AnnotationWireguardIP: wgIP,
@@ -59,7 +68,31 @@ func makeNode(name, podCIDR, wgIP, pubKey, endpoint string) *corev1.Node {
 			PodCIDR:  podCIDR,
 			PodCIDRs: []string{podCIDR},
 		},
+		Status: corev1.NodeStatus{
+			Addresses: []corev1.NodeAddress{
+				{Type: corev1.NodeExternalIP, Address: fallbackExternalIP},
+			},
+		},
 	}
+}
+
+// createNode persists a Node and its Status.Addresses on the given cluster.
+// kube-apiserver treats Status as a subresource, so Create persists Spec and
+// Metadata only — Status must be set via a separate UpdateStatus call.
+func createNode(t *testing.T, cl client.Client, node *corev1.Node) {
+	t.Helper()
+	ctx := context.Background()
+	require.NoError(t, cl.Create(ctx, node))
+
+	if len(node.Status.Addresses) == 0 {
+		return
+	}
+
+	// Re-fetch to get the resourceVersion assigned by Create, then patch status.
+	current := &corev1.Node{}
+	require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(node), current))
+	current.Status.Addresses = node.Status.Addresses
+	require.NoError(t, cl.Status().Update(ctx, current))
 }
 
 // reconcileOnce calls Reconcile for the given ClusterMesh and returns the error.

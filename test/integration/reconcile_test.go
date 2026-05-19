@@ -47,14 +47,14 @@ func TestHappyPath_TwoClusters(t *testing.T) {
 	// Create nodes in the local envtest.
 	localNode1 := makeNode("local-node-1", "10.1.0.0/24", "10.100.0.1/32", "pubkey-local-1", "")
 	localNode2 := makeNode("local-node-2", "10.1.1.0/24", "10.100.0.2/32", "pubkey-local-2", "")
-	require.NoError(t, globalEnv.localClient.Create(ctx, localNode1))
-	require.NoError(t, globalEnv.localClient.Create(ctx, localNode2))
+	createNode(t, globalEnv.localClient, localNode1)
+	createNode(t, globalEnv.localClient, localNode2)
 
 	// Create nodes in the remote envtest.
 	remoteNode1 := makeNode("remote-node-1", "10.2.0.0/24", "10.100.1.1/32", "pubkey-remote-1", "192.0.2.1:51820")
 	remoteNode2 := makeNode("remote-node-2", "10.2.1.0/24", "10.100.1.2/32", "pubkey-remote-2", "")
-	require.NoError(t, globalEnv.remoteClient.Create(ctx, remoteNode1))
-	require.NoError(t, globalEnv.remoteClient.Create(ctx, remoteNode2))
+	createNode(t, globalEnv.remoteClient, remoteNode1)
+	createNode(t, globalEnv.remoteClient, remoteNode2)
 
 	t.Cleanup(func() {
 		_ = globalEnv.localClient.Delete(ctx, localNode1)
@@ -110,16 +110,23 @@ func TestHappyPath_TwoClusters(t *testing.T) {
 		assert.NotEmpty(t, p.Spec.AllowedIPs)
 	}
 
-	// Verify that the peer with an explicit endpoint carries it through.
-	var peerWithEndpoint *kilov1alpha1.Peer
+	// Verify that the force-endpoint annotation on remote-node-1 is carried
+	// through to the resulting Peer (rather than the ExternalIP fallback).
+	expectedName := peer.Name(mesh.Name, "remote", "remote-node-1")
+
+	var peerWithForceEndpoint *kilov1alpha1.Peer
+
 	for i := range localPeers.Items {
-		if localPeers.Items[i].Spec.Endpoint != nil {
-			peerWithEndpoint = &localPeers.Items[i]
+		if localPeers.Items[i].Name == expectedName {
+			peerWithForceEndpoint = &localPeers.Items[i]
 			break
 		}
 	}
-	require.NotNil(t, peerWithEndpoint, "expected one peer to carry the force-endpoint")
-	assert.Equal(t, uint32(51820), peerWithEndpoint.Spec.Endpoint.Port)
+
+	require.NotNil(t, peerWithForceEndpoint, "expected peer %q for remote-node-1", expectedName)
+	require.NotNil(t, peerWithForceEndpoint.Spec.Endpoint)
+	assert.Equal(t, uint32(51820), peerWithForceEndpoint.Spec.Endpoint.Port)
+	assert.Equal(t, "192.0.2.1", peerWithForceEndpoint.Spec.Endpoint.DNSOrIP.IP)
 
 	// --- assert ClusterMesh status ---
 	waitForCondition(t, globalEnv.localClient, mesh, "Ready", metav1.ConditionTrue, eventuallyTimeout)

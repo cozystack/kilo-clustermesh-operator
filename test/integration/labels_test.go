@@ -46,8 +46,8 @@ func TestLabelIsolation_TwoMeshes(t *testing.T) {
 	alphaLocalNode := makeNode("alpha-local-node", "10.0.0.0/24", "10.100.10.1/32", "pubkey-alpha-local", "")
 	alphaRemoteNode := makeNode("alpha-remote-node", "10.10.0.0/24", "10.100.11.1/32", "pubkey-alpha-remote", "192.0.2.10:51820")
 
-	require.NoError(t, globalEnv.localClient.Create(ctx, alphaLocalNode))
-	require.NoError(t, globalEnv.remoteClient.Create(ctx, alphaRemoteNode))
+	createNode(t, globalEnv.localClient, alphaLocalNode)
+	createNode(t, globalEnv.remoteClient, alphaRemoteNode)
 
 	t.Cleanup(func() {
 		_ = globalEnv.localClient.Delete(ctx, alphaLocalNode)
@@ -58,8 +58,8 @@ func TestLabelIsolation_TwoMeshes(t *testing.T) {
 	betaLocalNode := makeNode("beta-local-node", "10.20.0.0/24", "10.100.20.1/32", "pubkey-beta-local", "")
 	betaRemoteNode := makeNode("beta-remote-node", "10.30.0.0/24", "10.100.21.1/32", "pubkey-beta-remote", "")
 
-	require.NoError(t, globalEnv.localClient.Create(ctx, betaLocalNode))
-	require.NoError(t, globalEnv.remoteClient.Create(ctx, betaRemoteNode))
+	createNode(t, globalEnv.localClient, betaLocalNode)
+	createNode(t, globalEnv.remoteClient, betaRemoteNode)
 
 	t.Cleanup(func() {
 		_ = globalEnv.localClient.Delete(ctx, betaLocalNode)
