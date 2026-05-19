@@ -48,8 +48,9 @@ var baseEntry = &v1alpha1.ClusterEntry{
 
 func baseAnnotations() map[string]string {
 	return map[string]string{
-		kilonode.AnnotationWireguardIP: "10.4.0.1/32",
-		kilonode.AnnotationPublicKey:   "dGVzdGtleQo=",
+		kilonode.AnnotationWireguardIP:   "10.4.0.1/32",
+		kilonode.AnnotationPublicKey:     "dGVzdGtleQo=",
+		kilonode.AnnotationForceEndpoint: "203.0.113.1:51820",
 	}
 }
 
@@ -110,9 +111,57 @@ func TestValidateNode(t *testing.T) {
 			// Only the host portion of the address is now validated against WireguardCIDR.
 			name: "wireguard IP with subnet mask (cozystack-Kilo style)",
 			node: makeNode("node-1", []string{"10.0.1.0/24"}, map[string]string{
-				kilonode.AnnotationWireguardIP: "10.4.0.1/24",
+				kilonode.AnnotationWireguardIP:   "10.4.0.1/24",
+				kilonode.AnnotationPublicKey:     "dGVzdGtleQo=",
+				kilonode.AnnotationForceEndpoint: "203.0.113.1:51820",
+			}),
+			entry:       baseEntry,
+			wantSkipped: false,
+		},
+		{
+			name: "no endpoint source skips node",
+			node: makeNode("node-1", []string{"10.0.1.0/24"}, map[string]string{
+				kilonode.AnnotationWireguardIP: "10.4.0.1/32",
 				kilonode.AnnotationPublicKey:   "dGVzdGtleQo=",
 			}),
+			entry:       baseEntry,
+			wantSkipped: true,
+			wantReason:  validation.ReasonNoEndpoint,
+		},
+		{
+			name: "malformed clustermesh-endpoint skips node",
+			node: makeNode("node-1", []string{"10.0.1.0/24"}, map[string]string{
+				kilonode.AnnotationWireguardIP:         "10.4.0.1/32",
+				kilonode.AnnotationPublicKey:           "dGVzdGtleQo=",
+				kilonode.AnnotationClustermeshEndpoint: "garbage",
+			}),
+			entry:       baseEntry,
+			wantSkipped: true,
+			wantReason:  validation.ReasonEndpointInvalid,
+		},
+		{
+			name: "malformed force-endpoint skips node",
+			node: makeNode("node-1", []string{"10.0.1.0/24"}, map[string]string{
+				kilonode.AnnotationWireguardIP:   "10.4.0.1/32",
+				kilonode.AnnotationPublicKey:     "dGVzdGtleQo=",
+				kilonode.AnnotationForceEndpoint: "no-colon-at-all",
+			}),
+			entry:       baseEntry,
+			wantSkipped: true,
+			wantReason:  validation.ReasonEndpointInvalid,
+		},
+		{
+			name: "ExternalIP-only is accepted",
+			node: func() *corev1.Node {
+				n := makeNode("node-1", []string{"10.0.1.0/24"}, map[string]string{
+					kilonode.AnnotationWireguardIP: "10.4.0.1/32",
+					kilonode.AnnotationPublicKey:   "dGVzdGtleQo=",
+				})
+				n.Status.Addresses = []corev1.NodeAddress{
+					{Type: corev1.NodeExternalIP, Address: "203.0.113.42"},
+				}
+				return n
+			}(),
 			entry:       baseEntry,
 			wantSkipped: false,
 		},
