@@ -37,11 +37,15 @@ const (
 	ReasonWGIPOutOfRange    NodeSkipReason = "WGIPOutOfRange"
 	ReasonWGIPDuplicate     NodeSkipReason = "WGIPDuplicate"
 	ReasonNoPublicKey       NodeSkipReason = "NodeNoPublicKey"
+	ReasonNoEndpoint        NodeSkipReason = "NodeNoEndpoint"
+	ReasonEndpointInvalid   NodeSkipReason = "NodeEndpointInvalid"
 )
 
 // ValidateNode checks whether a node is eligible to be peered.
 // It validates the node's PodCIDR against the cluster's PodCIDRs,
-// and the node's WireGuard IP against the cluster's WireguardCIDR.
+// the node's WireGuard IP against the cluster's WireguardCIDR, and
+// that the node exposes a resolvable WireGuard endpoint via the
+// kilonode fallback chain.
 // Returns (true, reason, message) if the node should be skipped, (false, "", "") if valid.
 func ValidateNode(node *corev1.Node, entry *v1alpha1.ClusterEntry) (bool, NodeSkipReason, string) {
 	if skip, reason, msg := validatePodCIDR(node, entry); skip {
@@ -53,6 +57,10 @@ func ValidateNode(node *corev1.Node, entry *v1alpha1.ClusterEntry) (bool, NodeSk
 	}
 
 	if skip, reason, msg := validatePublicKey(node); skip {
+		return true, reason, msg
+	}
+
+	if skip, reason, msg := validateEndpoint(node, entry); skip {
 		return true, reason, msg
 	}
 
@@ -128,6 +136,28 @@ func validatePublicKey(node *corev1.Node) (bool, NodeSkipReason, string) {
 	if !ok || key == "" {
 		return true, ReasonNoPublicKey, fmt.Sprintf(
 			"node %q is missing annotation %q", node.Name, kilonode.AnnotationPublicKey,
+		)
+	}
+
+	return false, "", ""
+}
+
+// validateEndpoint checks that the node has a resolvable WireGuard endpoint
+// via the kilonode fallback chain. A present-but-malformed annotation is a
+// distinct failure mode (ReasonEndpointInvalid) from a node with no source
+// at all (ReasonNoEndpoint).
+func validateEndpoint(node *corev1.Node, entry *v1alpha1.ClusterEntry) (bool, NodeSkipReason, string) {
+	_, found, err := kilonode.ResolveEndpoint(node, entry.WireguardPort)
+	if err != nil {
+		return true, ReasonEndpointInvalid, fmt.Sprintf(
+			"node %q has an invalid endpoint annotation: %v", node.Name, err,
+		)
+	}
+
+	if !found {
+		return true, ReasonNoEndpoint, fmt.Sprintf(
+			"node %q has no resolvable endpoint (no clustermesh-endpoint, force-endpoint, or ExternalIP)",
+			node.Name,
 		)
 	}
 
