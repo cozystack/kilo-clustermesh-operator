@@ -156,7 +156,7 @@ If the API server is slow to process the CRD (e.g., high load during cluster sta
 
 The chart's ClusterRole grants the operator's ServiceAccount:
 
-```
+```yaml
 apiGroups: [apiextensions.k8s.io]
 resources: [customresourcedefinitions]
 verbs: [get, create, update]
