@@ -236,7 +236,7 @@ type: kubernetes.io/service-account-token
 ```
 
 ```shell
-$ kubectl --context remote-cluster apply --filename remote-rbac.yaml
+kubectl --context remote-cluster apply --filename remote-rbac.yaml
 ```
 
 ### Building the kubeconfig Secret
@@ -433,7 +433,7 @@ The pod should be in `Running` state. If it is crash-looping, inspect logs — t
 ### 2. Check the ClusterMesh status
 
 ```shell
-$ kubectl --namespace kilo-clustermesh get clustermesh my-mesh --output yaml
+kubectl --namespace kilo-clustermesh get clustermesh my-mesh --output yaml
 ```
 
 Look for the `status.conditions` section. A healthy ClusterMesh shows:
@@ -458,13 +458,13 @@ See [Troubleshooting](./troubleshooting.md) for a full list of failure modes and
 On the central cluster, Peer objects for remote-cluster nodes should appear:
 
 ```shell
-$ kubectl --namespace kilo-clustermesh get peers.kilo.squat.ai
+kubectl --namespace kilo-clustermesh get peers.kilo.squat.ai
 ```
 
 On the remote cluster, Peer objects for central-cluster nodes should appear:
 
 ```shell
-$ kubectl --context remote-cluster get peers.kilo.squat.ai
+kubectl --context remote-cluster get peers.kilo.squat.ai
 ```
 
 If peers are absent on the remote cluster, check operator logs for reconciliation errors. Node-level issues (missing annotations, duplicate WireGuard IPs) cause individual nodes to be skipped rather than failing the entire reconcile — see [Per-Node Setup](./per-node-setup.md) for the required node annotations.
