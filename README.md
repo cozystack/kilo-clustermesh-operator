@@ -174,7 +174,7 @@ spec:
 ```
 
 > **Warning:** Pod CIDRs, WireGuard CIDRs, and service CIDRs must not overlap between any two clusters in the same namespace. Overlapping CIDRs block reconciliation for all affected meshes.
-
+>
 > **Note:** The CRD is automatically installed by the operator at startup — you do not need to apply it separately.
 
 ## How It Works
