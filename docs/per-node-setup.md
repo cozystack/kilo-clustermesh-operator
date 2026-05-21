@@ -59,7 +59,7 @@ The WireGuard public key for the node. The value is an opaque base64 string writ
 
 The operator calls `ResolveEndpoint(node, fallbackPort)` for each node. Sources are tried in priority order; **the first non-empty source wins**. Evaluation is lazy: once a source provides a value (valid or malformed), no lower-priority source is consulted.
 
-```
+```text
 1. kilo.squat.ai/clustermesh-endpoint   ← operator-specific, highest priority
 2. kilo.squat.ai/force-endpoint         ← Kilo's own annotation, legacy
 3. Node.Status.Addresses (ExternalIP)   ← last resort, uses wireguardPort
@@ -88,13 +88,13 @@ When neither annotation is set, the operator scans `Node.Status.Addresses` for e
 
 All endpoint values — whether from an annotation or synthesised from an ExternalIP — must conform to Go's `net.SplitHostPort` format:
 
-```
+```text
 <host>:<port>
 ```
 
 IPv6 addresses must be enclosed in square brackets:
 
-```
+```text
 [2001:db8::1]:51820
 ```
 
@@ -102,7 +102,7 @@ Bare IPv6 without brackets (e.g. `2001:db8::1:51820`) will fail parsing and the 
 
 Bracketed DNS names are also accepted:
 
-```
+```text
 [node.example.com]:51820
 ```
 
