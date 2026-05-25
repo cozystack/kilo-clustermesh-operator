@@ -1,0 +1,20 @@
+---
+apiVersion: cozystack.io/v1alpha1
+kind: PackageSource
+metadata:
+  name: kilo-clustermesh-operator
+  namespace: cozy-system
+spec:
+  url: oci://ghcr.io/cozystack
+  charts:
+    - name: cozy-kilo-clustermesh-operator
+      version: ">=0.0.1"
+      type: system
+---
+apiVersion: cozystack.io/v1alpha1
+kind: Package
+metadata:
+  name: cozystack.kilo-clustermesh-operator
+  namespace: cozy-system
+spec:
+  variant: default

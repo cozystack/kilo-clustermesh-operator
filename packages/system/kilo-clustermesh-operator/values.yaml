@@ -1,0 +1,6 @@
+# Defaults for the kilo-clustermesh-operator subchart inside the
+# cozy-kilo-clustermesh-operator wrapper. Operators override via
+# .Values.kilo-clustermesh-operator.* in the Cozystack Package
+# configuration.
+kilo-clustermesh-operator:
+  {}
