@@ -144,6 +144,70 @@ func TestIsHostRoute(t *testing.T) {
 	}
 }
 
+func TestParseHostInCIDR(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		input       string
+		wantHostIP  string
+		wantNetwork string
+		wantErr     bool
+	}{
+		{"IPv4 /32 host route", "10.4.0.1/32", "10.4.0.1", "10.4.0.1/32", false},
+		{"IPv4 host inside /16", "100.66.0.3/16", "100.66.0.3", "100.66.0.0/16", false},
+		{"IPv4 host inside /24", "10.4.0.1/24", "10.4.0.1", "10.4.0.0/24", false},
+		{"IPv6 /128 host route", "fd00::1/128", "fd00::1", "fd00::1/128", false},
+		{"IPv6 host inside /64", "fd00::1/64", "fd00::1", "fd00::/64", false},
+		{"invalid string", "not-a-cidr", "", "", true},
+		{"empty string", "", "", "", true},
+		{"IP without mask", "10.0.0.1", "", "", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			hostIP, network, err := ParseHostInCIDR(tt.input)
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.Nil(t, hostIP)
+				assert.Nil(t, network)
+
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantHostIP, hostIP.String())
+			assert.Equal(t, tt.wantNetwork, network.String())
+		})
+	}
+}
+
+func TestHostRoute(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		ip   string
+		want string
+	}{
+		{"IPv4", "100.66.0.3", "100.66.0.3/32"},
+		{"IPv4 zero", "10.0.0.0", "10.0.0.0/32"},
+		{"IPv6", "fd00::1", "fd00::1/128"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ip := net.ParseIP(tt.ip)
+			require.NotNil(t, ip, "ParseIP returned nil for %q", tt.ip)
+			assert.Equal(t, tt.want, HostRoute(ip))
+		})
+	}
+}
+
 func mustParse(t *testing.T, s string) *net.IPNet {
 	t.Helper()
 

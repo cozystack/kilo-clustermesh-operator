@@ -25,7 +25,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
@@ -107,7 +107,7 @@ func TestMain(m *testing.M) {
 		Scheme:   scheme,
 		Registry: registry,
 		Log:      slog.Default(),
-		Recorder: record.NewFakeRecorder(100),
+		Recorder: events.NewFakeRecorder(100),
 	}
 
 	globalEnv = testEnv{

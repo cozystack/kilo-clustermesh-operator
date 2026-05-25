@@ -25,7 +25,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -57,7 +57,7 @@ type ClusterMeshReconciler struct {
 	Scheme   *runtime.Scheme
 	Registry *multicluster.ClusterRegistry
 	Log      *slog.Logger
-	Recorder record.EventRecorder
+	Recorder events.EventRecorder
 }
 
 // Reconcile implements the main reconciliation loop for ClusterMesh objects.
@@ -233,7 +233,7 @@ func (r *ClusterMeshReconciler) filterNodes(log *slog.Logger, mesh *v1alpha1.Clu
 				slog.String("node", node.Name),
 				slog.String("reason", string(reason)),
 			)
-			r.Recorder.Event(mesh, corev1.EventTypeWarning, string(reason), "node "+node.Name+" has duplicate WireGuard IP")
+			r.Recorder.Eventf(mesh, nil, corev1.EventTypeWarning, string(reason), "SkipNodePeering", "node %s has duplicate WireGuard IP", node.Name)
 
 			skipped++
 
@@ -247,7 +247,7 @@ func (r *ClusterMeshReconciler) filterNodes(log *slog.Logger, mesh *v1alpha1.Clu
 				slog.String("reason", string(reason)),
 				slog.String("msg", msg),
 			)
-			r.Recorder.Event(mesh, corev1.EventTypeWarning, string(reason), msg)
+			r.Recorder.Eventf(mesh, nil, corev1.EventTypeWarning, string(reason), "SkipNodePeering", "%s", msg)
 
 			skipped++
 
@@ -303,7 +303,7 @@ func buildDesiredPeers(meshName string, entry *v1alpha1.ClusterEntry, nodes []*c
 	peers := make([]*kilov1alpha1.Peer, 0, len(nodes)+1)
 
 	for _, node := range nodes {
-		p, err := peer.BuildPeer(meshName, entry.Name, node)
+		p, err := peer.BuildPeer(meshName, entry, node)
 		if err != nil {
 			return nil, errors.Wrapf(err, "building peer for node %q", node.Name)
 		}
@@ -312,7 +312,7 @@ func buildDesiredPeers(meshName string, entry *v1alpha1.ClusterEntry, nodes []*c
 	}
 
 	if len(nodes) > 0 {
-		if anchor := peer.BuildAnchorPeer(meshName, entry.Name, entry, nodes[0]); anchor != nil {
+		if anchor := peer.BuildAnchorPeer(meshName, entry, nodes[0]); anchor != nil {
 			peers = append(peers, anchor)
 		}
 	}

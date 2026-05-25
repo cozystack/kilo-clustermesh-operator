@@ -17,28 +17,54 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
+	"log/slog"
 	"os"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	"github.com/cockroachdb/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	kilov1alpha1 "github.com/squat/kilo-clustermesh-operator/api/v1alpha1"
 	"github.com/squat/kilo-clustermesh-operator/internal/controller"
+	"github.com/squat/kilo-clustermesh-operator/internal/crd"
+	"github.com/squat/kilo-clustermesh-operator/internal/multicluster"
+	"github.com/squat/kilo-clustermesh-operator/internal/restart"
 	kilopeerv1alpha1 "github.com/squat/kilo-clustermesh-operator/pkg/kilo/v1alpha1"
 	// +kubebuilder:scaffold:imports
+)
+
+const (
+	podNamespaceEnv     = "POD_NAMESPACE"
+	leaderElectionID    = "f27237f1.squat.ai"
+	controllerEventName = "clustermesh-controller"
+)
+
+// version and revision are set at build time via -X linker flags:
+//
+//	-X main.version=${VERSION} -X main.revision=${REVISION}
+//
+// They default to the zero string when not provided (e.g. in local dev builds).
+var (
+	version  string
+	revision string
 )
 
 var (
@@ -55,163 +81,282 @@ func init() {
 }
 
 func main() {
-	var metricsAddr string
-
-	var metricsCertPath, metricsCertName, metricsCertKey string
-
-	var webhookCertPath, webhookCertName, webhookCertKey string
-
-	var enableLeaderElection bool
-
-	var probeAddr string
-
-	var secureMetrics bool
-
-	var enableHTTP2 bool
-
-	var tlsOpts []func(*tls.Config)
-
-	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
-		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
-	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
-	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
-		"Enable leader election for controller manager. "+
-			"Enabling this will ensure there is only one active controller manager.")
-	flag.BoolVar(&secureMetrics, "metrics-secure", true,
-		"If set, the metrics endpoint is served securely via HTTPS. Use --metrics-secure=false to use HTTP instead.")
-	flag.StringVar(&webhookCertPath, "webhook-cert-path", "", "The directory that contains the webhook certificate.")
-	flag.StringVar(&webhookCertName, "webhook-cert-name", "tls.crt", "The name of the webhook certificate file.")
-	flag.StringVar(&webhookCertKey, "webhook-cert-key", "tls.key", "The name of the webhook key file.")
-	flag.StringVar(&metricsCertPath, "metrics-cert-path", "",
-		"The directory that contains the metrics server certificate.")
-	flag.StringVar(&metricsCertName, "metrics-cert-name", "tls.crt", "The name of the metrics server certificate file.")
-	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
-	flag.BoolVar(&enableHTTP2, "enable-http2", false,
-		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
-
-	opts := zap.Options{
-		Development: true,
+	if err := run(); err != nil {
+		setupLog.Error(err, "operator exited with error")
+		os.Exit(1)
 	}
-	opts.BindFlags(flag.CommandLine)
+}
+
+func run() error {
+	opts := parseFlags()
+
+	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts.zapOpts)))
+	slogger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	namespace, err := readNamespace()
+	if err != nil {
+		return err
+	}
+
+	cfg := ctrl.GetConfigOrDie()
+
+	ctx, cancel := context.WithCancel(ctrl.SetupSignalHandler())
+	defer cancel()
+
+	if err := crd.InstallOrUpdate(ctx, cfg); err != nil {
+		return errors.Wrap(err, "installing CRD")
+	}
+
+	registry, err := buildInitialRegistry(ctx, cfg, namespace)
+	if err != nil {
+		return errors.Wrap(err, "building cluster registry")
+	}
+
+	mgr, err := newManager(cfg, &opts, namespace)
+	if err != nil {
+		return err
+	}
+
+	for name, c := range registry.All() {
+		if err := mgr.Add(c); err != nil {
+			return errors.Wrapf(err, "registering cluster %q with manager", name)
+		}
+	}
+
+	if err := wireReconciler(mgr, registry, slogger); err != nil {
+		return err
+	}
+
+	if err := wireChangeWatcher(ctx, mgr, namespace, slogger, cancel); err != nil {
+		return err
+	}
+
+	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
+		return errors.Wrap(err, "setting up health check")
+	}
+
+	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+		return errors.Wrap(err, "setting up ready check")
+	}
+
+	setupLog.Info("Starting manager",
+		"namespace", namespace,
+		"clusters", registry.Clusters(),
+		"version", version,
+		"revision", revision,
+	)
+
+	if err := mgr.Start(ctx); err != nil {
+		return errors.Wrap(err, "manager exited with error")
+	}
+
+	return nil
+}
+
+type runtimeOpts struct {
+	metricsAddr          string
+	probeAddr            string
+	metricsCertPath      string
+	metricsCertName      string
+	metricsCertKey       string
+	webhookCertPath      string
+	webhookCertName      string
+	webhookCertKey       string
+	enableLeaderElection bool
+	secureMetrics        bool
+	enableHTTP2          bool
+	zapOpts              zap.Options
+}
+
+func parseFlags() runtimeOpts {
+	opts := runtimeOpts{zapOpts: zap.Options{Development: true}}
+
+	flag.StringVar(&opts.metricsAddr, "metrics-bind-address", "0",
+		"The address the metrics endpoint binds to. Use :8443 for HTTPS or :8080 for HTTP, or 0 to disable.")
+	flag.StringVar(&opts.probeAddr, "health-probe-bind-address", ":8081",
+		"The address the probe endpoint binds to.")
+	flag.BoolVar(&opts.enableLeaderElection, "leader-elect", false,
+		"Enable leader election for controller manager.")
+	flag.BoolVar(&opts.secureMetrics, "metrics-secure", true,
+		"If set, the metrics endpoint is served securely via HTTPS.")
+	flag.StringVar(&opts.webhookCertPath, "webhook-cert-path", "",
+		"The directory that contains the webhook certificate.")
+	flag.StringVar(&opts.webhookCertName, "webhook-cert-name", "tls.crt",
+		"The name of the webhook certificate file.")
+	flag.StringVar(&opts.webhookCertKey, "webhook-cert-key", "tls.key",
+		"The name of the webhook key file.")
+	flag.StringVar(&opts.metricsCertPath, "metrics-cert-path", "",
+		"The directory that contains the metrics server certificate.")
+	flag.StringVar(&opts.metricsCertName, "metrics-cert-name", "tls.crt",
+		"The name of the metrics server certificate file.")
+	flag.StringVar(&opts.metricsCertKey, "metrics-cert-key", "tls.key",
+		"The name of the metrics server key file.")
+	flag.BoolVar(&opts.enableHTTP2, "enable-http2", false,
+		"If set, HTTP/2 will be enabled for the metrics and webhook servers.")
+	opts.zapOpts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
-	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+	return opts
+}
 
-	// if the enable-http2 flag is false (the default), http/2 should be disabled
-	// due to its vulnerabilities. More specifically, disabling http/2 will
-	// prevent from being vulnerable to the HTTP/2 Stream Cancellation and
-	// Rapid Reset CVEs. For more information see:
-	// - https://github.com/advisories/GHSA-qppj-fm5r-hxr3
-	// - https://github.com/advisories/GHSA-4374-p667-p6c8
+// readNamespace reads the operator's own namespace, set via the POD_NAMESPACE
+// env var (downward API) at deploy time.
+func readNamespace() (string, error) {
+	ns := os.Getenv(podNamespaceEnv)
+	if ns == "" {
+		return "", errors.Newf("%s environment variable is required", podNamespaceEnv)
+	}
+
+	return ns, nil
+}
+
+// buildInitialRegistry lists all ClusterMesh resources in the operator's
+// namespace and constructs a registry that holds clients for every declared
+// cluster. If no ClusterMesh resources exist yet, an empty registry is
+// returned and the change-watcher will trigger a restart once one is created.
+func buildInitialRegistry(ctx context.Context, cfg *rest.Config, namespace string) (*multicluster.ClusterRegistry, error) {
+	preClient, err := client.New(cfg, client.Options{Scheme: scheme})
+	if err != nil {
+		return nil, errors.Wrap(err, "building pre-manager client")
+	}
+
+	var meshes kilov1alpha1.ClusterMeshList
+	if err := preClient.List(ctx, &meshes, client.InNamespace(namespace)); err != nil {
+		return nil, errors.Wrap(err, "listing ClusterMesh resources")
+	}
+
+	merged := mergeClusterSpecs(meshes.Items)
+
+	registry, err := multicluster.Build(ctx, merged, cfg, namespace, preClient, scheme)
+
+	return registry, errors.Wrap(err, "constructing registry")
+}
+
+// mergeClusterSpecs collapses every cluster entry across every ClusterMesh
+// into a single spec, deduplicating by cluster name (first occurrence wins).
+func mergeClusterSpecs(meshes []kilov1alpha1.ClusterMesh) kilov1alpha1.ClusterMeshSpec {
+	seen := make(map[string]struct{})
+
+	var merged kilov1alpha1.ClusterMeshSpec
+
+	for i := range meshes {
+		for j := range meshes[i].Spec.Clusters {
+			entry := meshes[i].Spec.Clusters[j]
+			if _, dup := seen[entry.Name]; dup {
+				continue
+			}
+
+			seen[entry.Name] = struct{}{}
+			merged.Clusters = append(merged.Clusters, entry)
+		}
+	}
+
+	return merged
+}
+
+func newManager(cfg *rest.Config, opts *runtimeOpts, namespace string) (manager.Manager, error) {
+	var tlsOpts []func(*tls.Config)
+
 	disableHTTP2 := func(c *tls.Config) {
 		setupLog.Info("Disabling HTTP/2")
 
 		c.NextProtos = []string{"http/1.1"}
 	}
 
-	if !enableHTTP2 {
+	if !opts.enableHTTP2 {
 		tlsOpts = append(tlsOpts, disableHTTP2)
 	}
 
-	// Initial webhook TLS options
-	webhookTLSOpts := tlsOpts
-	webhookServerOptions := webhook.Options{
-		TLSOpts: webhookTLSOpts,
+	webhookServerOptions := webhook.Options{TLSOpts: tlsOpts}
+
+	if opts.webhookCertPath != "" {
+		webhookServerOptions.CertDir = opts.webhookCertPath
+		webhookServerOptions.CertName = opts.webhookCertName
+		webhookServerOptions.KeyName = opts.webhookCertKey
 	}
 
-	if webhookCertPath != "" {
-		setupLog.Info("Initializing webhook certificate watcher using provided certificates",
-			"webhook-cert-path", webhookCertPath, "webhook-cert-name", webhookCertName, "webhook-cert-key", webhookCertKey)
-
-		webhookServerOptions.CertDir = webhookCertPath
-		webhookServerOptions.CertName = webhookCertName
-		webhookServerOptions.KeyName = webhookCertKey
-	}
-
-	webhookServer := webhook.NewServer(webhookServerOptions)
-
-	// Metrics endpoint is enabled in 'config/default/kustomization.yaml'. The Metrics options configure the server.
-	// More info:
-	// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.23.3/pkg/metrics/server
-	// - https://book.kubebuilder.io/reference/metrics.html
 	metricsServerOptions := metricsserver.Options{
-		BindAddress:   metricsAddr,
-		SecureServing: secureMetrics,
+		BindAddress:   opts.metricsAddr,
+		SecureServing: opts.secureMetrics,
 		TLSOpts:       tlsOpts,
 	}
 
-	if secureMetrics {
-		// FilterProvider is used to protect the metrics endpoint with authn/authz.
-		// These configurations ensure that only authorized users and service accounts
-		// can access the metrics endpoint. The RBAC are configured in 'config/rbac/kustomization.yaml'. More info:
-		// https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.23.3/pkg/metrics/filters#WithAuthenticationAndAuthorization
+	if opts.secureMetrics {
 		metricsServerOptions.FilterProvider = filters.WithAuthenticationAndAuthorization
 	}
 
-	// If the certificate is not specified, controller-runtime will automatically
-	// generate self-signed certificates for the metrics server. While convenient for development and testing,
-	// this setup is not recommended for production.
-	//
-	// To enable certManager, uncomment the following lines:
-	// - [METRICS-WITH-CERTS] at config/default/kustomization.yaml to generate and use certificates
-	// managed by cert-manager for the metrics server.
-	// - [PROMETHEUS-WITH-CERTS] at config/prometheus/kustomization.yaml for TLS certification.
-	if metricsCertPath != "" {
-		setupLog.Info("Initializing metrics certificate watcher using provided certificates",
-			"metrics-cert-path", metricsCertPath, "metrics-cert-name", metricsCertName, "metrics-cert-key", metricsCertKey)
-
-		metricsServerOptions.CertDir = metricsCertPath
-		metricsServerOptions.CertName = metricsCertName
-		metricsServerOptions.KeyName = metricsCertKey
+	if opts.metricsCertPath != "" {
+		metricsServerOptions.CertDir = opts.metricsCertPath
+		metricsServerOptions.CertName = opts.metricsCertName
+		metricsServerOptions.KeyName = opts.metricsCertKey
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
-		WebhookServer:          webhookServer,
-		HealthProbeBindAddress: probeAddr,
-		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "f27237f1.squat.ai",
-		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
-		// when the Manager ends. This requires the binary to immediately end when the
-		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
-		// speeds up voluntary leader transitions as the new leader don't have to wait
-		// LeaseDuration time first.
-		//
-		// In the default scaffold provided, the program ends immediately after
-		// the manager stops, so would be fine to enable this option. However,
-		// if you are doing or is intended to do any operation such as perform cleanups
-		// after the manager stops then its usage might be unsafe.
-		// LeaderElectionReleaseOnCancel: true,
+		WebhookServer:          webhook.NewServer(webhookServerOptions),
+		HealthProbeBindAddress: opts.probeAddr,
+		LeaderElection:         opts.enableLeaderElection,
+		LeaderElectionID:       leaderElectionID,
+		// The manager's cache only watches namespaced types we own
+		// (ClusterMesh + Secret); restrict it to the operator's own
+		// namespace so we don't need cluster-wide list/watch RBAC.
+		// Cluster-scoped resources (Peers, Nodes, CRDs, Leases) are
+		// accessed via the multicluster registry or direct API calls,
+		// not the manager cache.
+		Cache: cache.Options{
+			DefaultNamespaces: map[string]cache.Config{
+				namespace: {},
+			},
+		},
 	})
+
+	return mgr, errors.Wrap(err, "creating manager")
+}
+
+func wireReconciler(mgr manager.Manager, registry *multicluster.ClusterRegistry, slogger *slog.Logger) error {
+	r := &controller.ClusterMeshReconciler{
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Registry: registry,
+		Log:      slogger,
+		Recorder: mgr.GetEventRecorder(controllerEventName),
+	}
+
+	return errors.Wrap(r.SetupWithManager(mgr), "registering ClusterMesh reconciler")
+}
+
+func wireChangeWatcher(
+	ctx context.Context,
+	mgr manager.Manager,
+	namespace string,
+	slogger *slog.Logger,
+	cancel context.CancelFunc,
+) error {
+	preClient, err := client.New(mgr.GetConfig(), client.Options{Scheme: scheme})
 	if err != nil {
-		setupLog.Error(err, "Failed to start manager")
-		os.Exit(1)
+		return errors.Wrap(err, "building pre-manager client for fingerprint")
 	}
 
-	if err := (&controller.ClusterMeshReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "Failed to create controller", "controller", "clustermesh")
-		os.Exit(1)
-	}
-	// +kubebuilder:scaffold:builder
-
-	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
-		setupLog.Error(err, "Failed to set up health check")
-		os.Exit(1)
+	watcher := &restart.ChangeWatcher{
+		Client:    mgr.GetClient(),
+		Namespace: namespace,
+		Log:       slogger,
+		Cancel:    cancel,
 	}
 
-	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
-		setupLog.Error(err, "Failed to set up ready check")
-		os.Exit(1)
+	bootstrap := &restart.ChangeWatcher{
+		Client:    preClient,
+		Namespace: namespace,
+		Log:       slogger,
 	}
 
-	setupLog.Info("Starting manager")
-
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
-		setupLog.Error(err, "Failed to run manager")
-		os.Exit(1)
+	fingerprint, err := bootstrap.ComputeFingerprint(ctx)
+	if err != nil {
+		return errors.Wrap(err, "computing start fingerprint")
 	}
+
+	watcher.StartFingerprint = fingerprint
+
+	return errors.Wrap(watcher.SetupWithManager(mgr), "registering change-watcher")
 }

@@ -62,7 +62,10 @@ func (w *ChangeWatcher) Reconcile(ctx context.Context, _ reconcile.Request) (rec
 			slog.String("old", w.StartFingerprint),
 			slog.String("new", fingerprint),
 		)
-		w.Cancel()
+
+		if w.Cancel != nil {
+			w.Cancel()
+		}
 	}
 
 	return reconcile.Result{}, nil

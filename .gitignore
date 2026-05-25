@@ -42,3 +42,6 @@ Thumbs.db
 
 # Internal planning docs (not for public history)
 PLAN.md
+
+# Cluster-specific deployment manifests (kept local; not part of the project)
+deploy/
