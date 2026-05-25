@@ -33,7 +33,6 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -107,12 +106,12 @@ func run() error {
 		return errors.Wrap(err, "installing CRD")
 	}
 
-	registry, err := buildInitialRegistry(ctx, cfg, namespace)
+	registry, err := buildInitialRegistry(ctx, cfg)
 	if err != nil {
 		return errors.Wrap(err, "building cluster registry")
 	}
 
-	mgr, err := newManager(cfg, &opts, namespace)
+	mgr, err := newManager(cfg, &opts)
 	if err != nil {
 		return err
 	}
@@ -127,7 +126,7 @@ func run() error {
 		return err
 	}
 
-	if err := wireChangeWatcher(ctx, mgr, namespace, slogger, cancel); err != nil {
+	if err := wireChangeWatcher(ctx, mgr, slogger, cancel); err != nil {
 		return err
 	}
 
@@ -214,30 +213,33 @@ func readNamespace() (string, error) {
 // namespace and constructs a registry that holds clients for every declared
 // cluster. If no ClusterMesh resources exist yet, an empty registry is
 // returned and the change-watcher will trigger a restart once one is created.
-func buildInitialRegistry(ctx context.Context, cfg *rest.Config, namespace string) (*multicluster.ClusterRegistry, error) {
+func buildInitialRegistry(ctx context.Context, cfg *rest.Config) (*multicluster.ClusterRegistry, error) {
 	preClient, err := client.New(cfg, client.Options{Scheme: scheme})
 	if err != nil {
 		return nil, errors.Wrap(err, "building pre-manager client")
 	}
 
 	var meshes kilov1alpha1.ClusterMeshList
-	if err := preClient.List(ctx, &meshes, client.InNamespace(namespace)); err != nil {
+	if err := preClient.List(ctx, &meshes); err != nil {
 		return nil, errors.Wrap(err, "listing ClusterMesh resources")
 	}
 
-	merged := mergeClusterSpecs(meshes.Items)
+	entries := mergeClusterEntries(meshes.Items)
 
-	registry, err := multicluster.Build(ctx, merged, cfg, namespace, preClient, scheme)
+	registry, err := multicluster.Build(ctx, entries, cfg, preClient, scheme)
 
 	return registry, errors.Wrap(err, "constructing registry")
 }
 
-// mergeClusterSpecs collapses every cluster entry across every ClusterMesh
-// into a single spec, deduplicating by cluster name (first occurrence wins).
-func mergeClusterSpecs(meshes []kilov1alpha1.ClusterMesh) kilov1alpha1.ClusterMeshSpec {
+// mergeClusterEntries collapses every cluster entry across every ClusterMesh
+// into a single list, deduplicating by cluster name (first occurrence wins).
+// Each entry is tagged with the namespace of the ClusterMesh it came from so
+// the kubeconfig Secret can be resolved without an explicit namespace field
+// on KubeconfigSecretRef.
+func mergeClusterEntries(meshes []kilov1alpha1.ClusterMesh) []multicluster.EntrySource {
 	seen := make(map[string]struct{})
 
-	var merged kilov1alpha1.ClusterMeshSpec
+	entries := make([]multicluster.EntrySource, 0)
 
 	for i := range meshes {
 		for j := range meshes[i].Spec.Clusters {
@@ -247,14 +249,17 @@ func mergeClusterSpecs(meshes []kilov1alpha1.ClusterMesh) kilov1alpha1.ClusterMe
 			}
 
 			seen[entry.Name] = struct{}{}
-			merged.Clusters = append(merged.Clusters, entry)
+			entries = append(entries, multicluster.EntrySource{
+				Entry:         entry,
+				MeshNamespace: meshes[i].Namespace,
+			})
 		}
 	}
 
-	return merged
+	return entries
 }
 
-func newManager(cfg *rest.Config, opts *runtimeOpts, namespace string) (manager.Manager, error) {
+func newManager(cfg *rest.Config, opts *runtimeOpts) (manager.Manager, error) {
 	var tlsOpts []func(*tls.Config)
 
 	disableHTTP2 := func(c *tls.Config) {
@@ -298,17 +303,11 @@ func newManager(cfg *rest.Config, opts *runtimeOpts, namespace string) (manager.
 		HealthProbeBindAddress: opts.probeAddr,
 		LeaderElection:         opts.enableLeaderElection,
 		LeaderElectionID:       leaderElectionID,
-		// The manager's cache only watches namespaced types we own
-		// (ClusterMesh + Secret); restrict it to the operator's own
-		// namespace so we don't need cluster-wide list/watch RBAC.
-		// Cluster-scoped resources (Peers, Nodes, CRDs, Leases) are
-		// accessed via the multicluster registry or direct API calls,
-		// not the manager cache.
-		Cache: cache.Options{
-			DefaultNamespaces: map[string]cache.Config{
-				namespace: {},
-			},
-		},
+		// The manager's cache watches namespaced types we own
+		// (ClusterMesh + Secret) cluster-wide so users can place
+		// ClusterMesh CRs alongside whichever Secret the Kubernetes
+		// distribution emits (e.g. Cozystack/Kamaji puts tenant
+		// admin-kubeconfig Secrets in tenant-root).
 	})
 
 	return mgr, errors.Wrap(err, "creating manager")
@@ -329,7 +328,6 @@ func wireReconciler(mgr manager.Manager, registry *multicluster.ClusterRegistry,
 func wireChangeWatcher(
 	ctx context.Context,
 	mgr manager.Manager,
-	namespace string,
 	slogger *slog.Logger,
 	cancel context.CancelFunc,
 ) error {
@@ -339,16 +337,14 @@ func wireChangeWatcher(
 	}
 
 	watcher := &restart.ChangeWatcher{
-		Client:    mgr.GetClient(),
-		Namespace: namespace,
-		Log:       slogger,
-		Cancel:    cancel,
+		Client: mgr.GetClient(),
+		Log:    slogger,
+		Cancel: cancel,
 	}
 
 	bootstrap := &restart.ChangeWatcher{
-		Client:    preClient,
-		Namespace: namespace,
-		Log:       slogger,
+		Client: preClient,
+		Log:    slogger,
 	}
 
 	fingerprint, err := bootstrap.ComputeFingerprint(ctx)

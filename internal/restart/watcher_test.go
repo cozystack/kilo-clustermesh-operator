@@ -69,7 +69,6 @@ func TestReconcile_SameFingerprint_NoCancelCalled(t *testing.T) {
 	watcher := &ChangeWatcher{
 		Client:    fc,
 		Cancel:    func() { cancelled = true },
-		Namespace: "default",
 		Log:       testLogger(),
 	}
 
@@ -103,7 +102,6 @@ func TestReconcile_NewMeshAdded_CancelCalled(t *testing.T) {
 	watcher := &ChangeWatcher{
 		Client:    fc,
 		Cancel:    func() { cancelled = true },
-		Namespace: "default",
 		Log:       testLogger(),
 	}
 
@@ -160,7 +158,6 @@ func TestReconcile_SecretRVChanged_CancelCalled(t *testing.T) {
 	watcher := &ChangeWatcher{
 		Client:    fc,
 		Cancel:    func() { cancelled = true },
-		Namespace: "default",
 		Log:       testLogger(),
 	}
 
@@ -207,8 +204,8 @@ func TestFingerprint_StableUnderReordering(t *testing.T) {
 	fc1 := fake.NewClientBuilder().WithScheme(scheme).WithObjects(meshA).Build()
 	fc2 := fake.NewClientBuilder().WithScheme(scheme).WithObjects(meshB).Build()
 
-	w1 := &ChangeWatcher{Client: fc1, Namespace: "default", Log: testLogger()}
-	w2 := &ChangeWatcher{Client: fc2, Namespace: "default", Log: testLogger()}
+	w1 := &ChangeWatcher{Client: fc1, Log: testLogger()}
+	w2 := &ChangeWatcher{Client: fc2, Log: testLogger()}
 
 	ctx := context.Background()
 
@@ -227,7 +224,7 @@ func TestFingerprint_NoMeshes(t *testing.T) {
 	scheme := testScheme(t)
 	fc := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	watcher := &ChangeWatcher{Client: fc, Namespace: "default", Log: testLogger()}
+	watcher := &ChangeWatcher{Client: fc, Log: testLogger()}
 
 	fp, err := watcher.ComputeFingerprint(context.Background())
 	require.NoError(t, err)
@@ -260,7 +257,6 @@ func TestReconcile_NilCancel_NoPanic(t *testing.T) {
 	watcher := &ChangeWatcher{
 		Client:           fc,
 		Cancel:           nil, // intentionally nil
-		Namespace:        "default",
 		Log:              testLogger(),
 		StartFingerprint: "this-will-not-match",
 	}
