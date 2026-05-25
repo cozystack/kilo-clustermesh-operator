@@ -1,0 +1,6 @@
+dependencies:
+- name: kilo-clustermesh-operator
+  repository: file://../../../charts/kilo-clustermesh-operator
+  version: 0.1.0
+digest: sha256:9f6c56f5a868ce8dc6471b89410730a35944491777622814e0dccbccdfd40ba5
+generated: "2026-05-25T14:58:35.216324+03:00"

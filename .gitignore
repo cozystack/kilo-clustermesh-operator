@@ -45,3 +45,4 @@ PLAN.md
 
 # Cluster-specific deployment manifests (kept local; not part of the project)
 deploy/
+/packages/system/kilo-clustermesh-operator/charts/
