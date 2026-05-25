@@ -17,6 +17,94 @@ tests:
               - list
               - watch
 
+  - it: ClusterRole should have rules for clustermeshes
+    template: clusterrole.yaml
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - kilo.squat.ai
+            resources:
+              - clustermeshes
+            verbs:
+              - get
+              - list
+              - watch
+              - update
+              - patch
+
+  - it: ClusterRole should have rules for clustermeshes/status
+    template: clusterrole.yaml
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - kilo.squat.ai
+            resources:
+              - clustermeshes/status
+            verbs:
+              - get
+              - update
+              - patch
+
+  - it: ClusterRole should have rules for clustermeshes/finalizers
+    template: clusterrole.yaml
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - kilo.squat.ai
+            resources:
+              - clustermeshes/finalizers
+            verbs:
+              - update
+
+  - it: ClusterRole should have rules for secrets
+    template: clusterrole.yaml
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - ""
+            resources:
+              - secrets
+            verbs:
+              - get
+              - list
+              - watch
+
+  - it: ClusterRole should have rules for events
+    template: clusterrole.yaml
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - ""
+            resources:
+              - events
+            verbs:
+              - create
+              - patch
+
+  - it: ClusterRole should have rules for events.k8s.io events
+    template: clusterrole.yaml
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - events.k8s.io
+            resources:
+              - events
+            verbs:
+              - create
+              - patch
+
   - it: ClusterRole should have rules for peers
     template: clusterrole.yaml
     asserts:
@@ -89,132 +177,6 @@ tests:
 
   - it: ClusterRoleBinding should use custom serviceaccount name when specified
     template: clusterrolebinding.yaml
-    release:
-      name: my-release
-      namespace: test-ns
-    set:
-      serviceAccount.name: custom-sa
-    asserts:
-      - contains:
-          path: subjects
-          content:
-            kind: ServiceAccount
-            name: custom-sa
-            namespace: test-ns
-
-  - it: Role should have rules for clustermeshes
-    template: role.yaml
-    asserts:
-      - isKind:
-          of: Role
-      - contains:
-          path: rules
-          content:
-            apiGroups:
-              - kilo.squat.ai
-            resources:
-              - clustermeshes
-            verbs:
-              - get
-              - list
-              - watch
-              - update
-              - patch
-
-  - it: Role should have rules for clustermeshes/status
-    template: role.yaml
-    asserts:
-      - contains:
-          path: rules
-          content:
-            apiGroups:
-              - kilo.squat.ai
-            resources:
-              - clustermeshes/status
-            verbs:
-              - get
-              - update
-              - patch
-
-  - it: Role should have rules for clustermeshes/finalizers
-    template: role.yaml
-    asserts:
-      - contains:
-          path: rules
-          content:
-            apiGroups:
-              - kilo.squat.ai
-            resources:
-              - clustermeshes/finalizers
-            verbs:
-              - update
-
-  - it: Role should have rules for secrets
-    template: role.yaml
-    asserts:
-      - contains:
-          path: rules
-          content:
-            apiGroups:
-              - ""
-            resources:
-              - secrets
-            verbs:
-              - get
-              - list
-              - watch
-
-  - it: Role should have rules for events
-    template: role.yaml
-    asserts:
-      - contains:
-          path: rules
-          content:
-            apiGroups:
-              - ""
-            resources:
-              - events
-            verbs:
-              - create
-              - patch
-
-  - it: Role should have rules for events.k8s.io events
-    template: role.yaml
-    asserts:
-      - contains:
-          path: rules
-          content:
-            apiGroups:
-              - events.k8s.io
-            resources:
-              - events
-            verbs:
-              - create
-              - patch
-
-  - it: RoleBinding should reference correct ServiceAccount
-    template: rolebinding.yaml
-    release:
-      name: my-release
-      namespace: test-ns
-    asserts:
-      - isKind:
-          of: RoleBinding
-      - contains:
-          path: subjects
-          content:
-            kind: ServiceAccount
-            name: my-release-kilo-clustermesh-operator
-            namespace: test-ns
-      - equal:
-          path: roleRef.kind
-          value: Role
-      - equal:
-          path: roleRef.name
-          value: my-release-kilo-clustermesh-operator
-
-  - it: RoleBinding should use custom serviceaccount name when specified
-    template: rolebinding.yaml
     release:
       name: my-release
       namespace: test-ns

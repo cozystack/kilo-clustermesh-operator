@@ -13,6 +13,55 @@ rules:
       - get
       - list
       - watch
+  # ClusterMesh CRs and the Secrets they reference are watched cluster-wide
+  # so users can colocate them with the Kamaji-managed tenant kubeconfig
+  # Secrets in any namespace (typically `tenant-root` for Cozystack).
+  - apiGroups:
+      - kilo.squat.ai
+    resources:
+      - clustermeshes
+    verbs:
+      - get
+      - list
+      - watch
+      - update
+      - patch
+  - apiGroups:
+      - kilo.squat.ai
+    resources:
+      - clustermeshes/status
+    verbs:
+      - get
+      - update
+      - patch
+  - apiGroups:
+      - kilo.squat.ai
+    resources:
+      - clustermeshes/finalizers
+    verbs:
+      - update
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
+  - apiGroups:
+      - events.k8s.io
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
   - apiGroups:
       - kilo.squat.ai
     resources:

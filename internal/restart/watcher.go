@@ -37,12 +37,14 @@ import (
 
 // ChangeWatcher watches ClusterMesh resources and referenced Secrets.
 // When the cluster configuration fingerprint changes, it cancels the
-// manager's context to trigger a pod restart.
+// manager's context to trigger a pod restart. The operator watches
+// cluster-wide; each ClusterMesh references its kubeconfig Secret by
+// name only, so Secrets are resolved in the namespace of the CR that
+// references them.
 type ChangeWatcher struct {
 	client.Client
 
 	Cancel           context.CancelFunc
-	Namespace        string
 	StartFingerprint string
 	Log              *slog.Logger
 }
@@ -92,16 +94,17 @@ func (w *ChangeWatcher) ComputeFingerprint(ctx context.Context) (string, error) 
 
 // clusterRef is the deterministic representation used for fingerprinting.
 type clusterRef struct {
-	Name       string `json:"name"`
-	SecretName string `json:"secretName"`
-	SecretRV   string `json:"secretRV"` //nolint:tagliatelle // "RV" is the canonical Go abbreviation for ResourceVersion; "Rv" would be misleading
+	Name            string `json:"name"`
+	SecretNamespace string `json:"secretNamespace"`
+	SecretName      string `json:"secretName"`
+	SecretRV        string `json:"secretRV"` //nolint:tagliatelle // "RV" is the canonical Go abbreviation for ResourceVersion; "Rv" would be misleading
 }
 
 // secretResourceVersion fetches the ResourceVersion for a Secret; returns "" on error.
-func (w *ChangeWatcher) secretResourceVersion(ctx context.Context, name string) string {
+func (w *ChangeWatcher) secretResourceVersion(ctx context.Context, namespace, name string) string {
 	var secret corev1.Secret
 
-	err := w.Get(ctx, types.NamespacedName{Namespace: w.Namespace, Name: name}, &secret)
+	err := w.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &secret)
 	if err != nil {
 		return ""
 	}
@@ -114,13 +117,16 @@ func (w *ChangeWatcher) collectRefs(ctx context.Context, meshes []v1alpha1.Clust
 	var refs []clusterRef
 
 	for i := range meshes {
+		meshNS := meshes[i].Namespace
+
 		for j := range meshes[i].Spec.Clusters {
 			c := &meshes[i].Spec.Clusters[j]
 			ref := clusterRef{Name: c.Name}
 
 			if c.KubeconfigSecretRef != nil {
+				ref.SecretNamespace = meshNS
 				ref.SecretName = c.KubeconfigSecretRef.Name
-				ref.SecretRV = w.secretResourceVersion(ctx, c.KubeconfigSecretRef.Name)
+				ref.SecretRV = w.secretResourceVersion(ctx, meshNS, c.KubeconfigSecretRef.Name)
 			}
 
 			refs = append(refs, ref)
@@ -137,7 +143,7 @@ func (w *ChangeWatcher) collectRefs(ctx context.Context, meshes []v1alpha1.Clust
 func (w *ChangeWatcher) computeFingerprint(ctx context.Context) (string, error) {
 	var meshes v1alpha1.ClusterMeshList
 
-	err := w.List(ctx, &meshes, client.InNamespace(w.Namespace))
+	err := w.List(ctx, &meshes)
 	if err != nil {
 		return "", errors.Wrap(err, "listing ClusterMeshes")
 	}
@@ -151,14 +157,16 @@ func (w *ChangeWatcher) computeFingerprint(ctx context.Context) (string, error) 
 }
 
 // secretToClusterMesh maps a Secret change to reconcile requests for
-// all ClusterMeshes that reference it.
+// all ClusterMeshes that reference it. Match is by Secret's own namespace
+// (which equals the namespace of the ClusterMesh that referenced it,
+// because KubeconfigSecretRef has no namespace field).
 func (w *ChangeWatcher) secretToClusterMesh(
 	ctx context.Context,
 	obj client.Object,
 ) []reconcile.Request {
 	var meshes v1alpha1.ClusterMeshList
 
-	err := w.List(ctx, &meshes, client.InNamespace(w.Namespace))
+	err := w.List(ctx, &meshes, client.InNamespace(obj.GetNamespace()))
 	if err != nil {
 		return nil
 	}

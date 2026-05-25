@@ -94,23 +94,35 @@ func (d *directCluster) GetEventRecorder(_ string) k8sevents.EventRecorder {
 	panic("directCluster: GetEventRecorder not implemented")
 }
 
-// Build creates a ClusterRegistry from a ClusterMesh spec.
+// EntrySource pairs a cluster entry with the namespace of the ClusterMesh
+// resource that contains it. The operator watches ClusterMesh objects
+// cluster-wide, and the CRD's kubeconfigSecretRef has no namespace field,
+// so the originating namespace is the only place the Secret can be read
+// from.
+type EntrySource struct {
+	Entry          v1alpha1.ClusterEntry
+	MeshNamespace string
+}
+
+// Build creates a ClusterRegistry from a list of cluster entries.
 // localCfg is the rest.Config of the cluster where the controller runs.
-// kubeClient is used to read kubeconfig Secrets for remote clusters.
+// kubeClient is used to read kubeconfig Secrets for remote clusters from the
+// namespace of the ClusterMesh resource that contributed each entry.
 func Build(
 	ctx context.Context,
-	spec v1alpha1.ClusterMeshSpec,
+	entries []EntrySource,
 	localCfg *rest.Config,
-	namespace string,
 	kubeClient client.Client,
 	scheme *runtime.Scheme,
 ) (*ClusterRegistry, error) {
 	reg := &ClusterRegistry{
-		clusters: make(map[string]cluster.Cluster, len(spec.Clusters)),
+		clusters: make(map[string]cluster.Cluster, len(entries)),
 	}
 
-	for _, entry := range spec.Clusters {
-		cfg, err := configForEntry(ctx, &entry, localCfg, namespace, kubeClient)
+	for _, src := range entries {
+		entry := src.Entry
+
+		cfg, err := configForEntry(ctx, &entry, localCfg, src.MeshNamespace, kubeClient)
 		if err != nil {
 			return nil, err
 		}
@@ -133,12 +145,13 @@ func Build(
 }
 
 // configForEntry returns the rest.Config for a cluster entry.
-// For local entries it copies localCfg; for remote entries it reads the kubeconfig Secret.
+// For local entries it copies localCfg; for remote entries it reads the
+// kubeconfig Secret from the originating ClusterMesh's namespace.
 func configForEntry(
 	ctx context.Context,
 	entry *v1alpha1.ClusterEntry,
 	localCfg *rest.Config,
-	namespace string,
+	meshNamespace string,
 	kubeClient client.Client,
 ) (*rest.Config, error) {
 	if entry.Local {
@@ -149,7 +162,7 @@ func configForEntry(
 		return nil, errors.Newf("cluster %q is not local but has no kubeconfigSecretRef", entry.Name)
 	}
 
-	cfg, err := RestConfigFromSecret(ctx, kubeClient, namespace, *entry.KubeconfigSecretRef)
+	cfg, err := RestConfigFromSecret(ctx, kubeClient, meshNamespace, *entry.KubeconfigSecretRef)
 	if err != nil {
 		return nil, errors.Wrapf(err, "building config for cluster %q", entry.Name)
 	}

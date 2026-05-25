@@ -23,13 +23,18 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	kilov1alpha1 "github.com/squat/kilo-clustermesh-operator/api/v1alpha1"
+	"github.com/squat/kilo-clustermesh-operator/internal/multicluster"
 )
 
 func mesh(name string, clusters ...kilov1alpha1.ClusterEntry) kilov1alpha1.ClusterMesh {
 	return kilov1alpha1.ClusterMesh{
-		ObjectMeta: metav1.ObjectMeta{Name: name},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
 		Spec:       kilov1alpha1.ClusterMeshSpec{Clusters: clusters},
 	}
+}
+
+func sourceFromEntry(meshNamespace string, e kilov1alpha1.ClusterEntry) multicluster.EntrySource {
+	return multicluster.EntrySource{Entry: e, MeshNamespace: meshNamespace}
 }
 
 func entry(name string, podCIDR string) kilov1alpha1.ClusterEntry {
@@ -40,13 +45,13 @@ func entry(name string, podCIDR string) kilov1alpha1.ClusterEntry {
 	}
 }
 
-func TestMergeClusterSpecs(t *testing.T) {
+func TestMergeClusterEntries(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name   string
 		meshes []kilov1alpha1.ClusterMesh
-		want   []kilov1alpha1.ClusterEntry
+		want   []multicluster.EntrySource
 	}{
 		{
 			name: "single mesh with multiple unique clusters preserves all and order",
@@ -57,10 +62,10 @@ func TestMergeClusterSpecs(t *testing.T) {
 					entry("gamma", "10.2.0.0/16"),
 				),
 			},
-			want: []kilov1alpha1.ClusterEntry{
-				entry("alpha", "10.0.0.0/16"),
-				entry("beta", "10.1.0.0/16"),
-				entry("gamma", "10.2.0.0/16"),
+			want: []multicluster.EntrySource{
+				sourceFromEntry("default", entry("alpha", "10.0.0.0/16")),
+				sourceFromEntry("default", entry("beta", "10.1.0.0/16")),
+				sourceFromEntry("default", entry("gamma", "10.2.0.0/16")),
 			},
 		},
 		{
@@ -75,11 +80,11 @@ func TestMergeClusterSpecs(t *testing.T) {
 					entry("delta", "10.3.0.0/16"),
 				),
 			},
-			want: []kilov1alpha1.ClusterEntry{
-				entry("alpha", "10.0.0.0/16"),
-				entry("beta", "10.1.0.0/16"),
-				entry("gamma", "10.2.0.0/16"),
-				entry("delta", "10.3.0.0/16"),
+			want: []multicluster.EntrySource{
+				sourceFromEntry("default", entry("alpha", "10.0.0.0/16")),
+				sourceFromEntry("default", entry("beta", "10.1.0.0/16")),
+				sourceFromEntry("default", entry("gamma", "10.2.0.0/16")),
+				sourceFromEntry("default", entry("delta", "10.3.0.0/16")),
 			},
 		},
 		{
@@ -96,10 +101,10 @@ func TestMergeClusterSpecs(t *testing.T) {
 					entry("unique2", "10.2.0.0/16"),
 				),
 			},
-			want: []kilov1alpha1.ClusterEntry{
-				entry("shared", "10.0.0.0/16"), // first occurrence (from mesh1) wins
-				entry("unique1", "10.1.0.0/16"),
-				entry("unique2", "10.2.0.0/16"),
+			want: []multicluster.EntrySource{
+				sourceFromEntry("default", entry("shared", "10.0.0.0/16")), // first occurrence (from mesh1) wins
+				sourceFromEntry("default", entry("unique1", "10.1.0.0/16")),
+				sourceFromEntry("default", entry("unique2", "10.2.0.0/16")),
 			},
 		},
 		{
@@ -111,9 +116,9 @@ func TestMergeClusterSpecs(t *testing.T) {
 					entry("unique", "10.1.0.0/16"),
 				),
 			},
-			want: []kilov1alpha1.ClusterEntry{
-				entry("dup", "10.0.0.0/16"),
-				entry("unique", "10.1.0.0/16"),
+			want: []multicluster.EntrySource{
+				sourceFromEntry("default", entry("dup", "10.0.0.0/16")),
+				sourceFromEntry("default", entry("unique", "10.1.0.0/16")),
 			},
 		},
 		{
@@ -134,9 +139,13 @@ func TestMergeClusterSpecs(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := mergeClusterSpecs(testCase.meshes)
+			got := mergeClusterEntries(testCase.meshes)
 
-			assert.Equal(t, testCase.want, got.Clusters)
+			if len(testCase.want) == 0 {
+				assert.Empty(t, got)
+			} else {
+				assert.Equal(t, testCase.want, got)
+			}
 		})
 	}
 }
