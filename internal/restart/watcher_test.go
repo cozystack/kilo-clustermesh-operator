@@ -67,9 +67,9 @@ func TestReconcile_SameFingerprint_NoCancelCalled(t *testing.T) {
 	cancelled := false
 
 	watcher := &ChangeWatcher{
-		Client:    fc,
-		Cancel:    func() { cancelled = true },
-		Log:       testLogger(),
+		Client: fc,
+		Cancel: func() { cancelled = true },
+		Log:    testLogger(),
 	}
 
 	fp, err := watcher.ComputeFingerprint(context.Background())
@@ -100,9 +100,9 @@ func TestReconcile_NewMeshAdded_CancelCalled(t *testing.T) {
 	cancelled := false
 
 	watcher := &ChangeWatcher{
-		Client:    fc,
-		Cancel:    func() { cancelled = true },
-		Log:       testLogger(),
+		Client: fc,
+		Cancel: func() { cancelled = true },
+		Log:    testLogger(),
 	}
 
 	fp, err := watcher.ComputeFingerprint(context.Background())
@@ -156,9 +156,9 @@ func TestReconcile_SecretRVChanged_CancelCalled(t *testing.T) {
 	cancelled := false
 
 	watcher := &ChangeWatcher{
-		Client:    fc,
-		Cancel:    func() { cancelled = true },
-		Log:       testLogger(),
+		Client: fc,
+		Cancel: func() { cancelled = true },
+		Log:    testLogger(),
 	}
 
 	fp, err := watcher.ComputeFingerprint(context.Background())
