@@ -24,7 +24,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-const defaultWireguardPort = 51820
+// DefaultWireguardPort is the UDP port Kilo's WireGuard endpoint listens on
+// when neither the ClusterMesh spec nor a node annotation overrides it.
+const DefaultWireguardPort = 51820
 
 // ResolveEndpoint determines the WireGuard endpoint string ("host:port") for a node.
 // Sources are tried in priority order; the first non-empty source wins. A malformed
@@ -60,7 +62,7 @@ func ResolveEndpoint(node *corev1.Node, fallbackPort uint16) (string, bool, erro
 	// Source 3: Node.Status.Addresses ExternalIP, preferring IPv4 over IPv6.
 	port := fallbackPort
 	if port == 0 {
-		port = defaultWireguardPort
+		port = DefaultWireguardPort
 	}
 
 	if endpoint, ok := resolveFromExternalIPs(node.Status.Addresses, port); ok {

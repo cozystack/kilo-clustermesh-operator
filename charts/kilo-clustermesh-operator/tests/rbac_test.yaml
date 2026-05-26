@@ -16,6 +16,7 @@ tests:
               - get
               - list
               - watch
+              - patch
 
   - it: ClusterRole should have rules for clustermeshes
     template: clusterrole.yaml
