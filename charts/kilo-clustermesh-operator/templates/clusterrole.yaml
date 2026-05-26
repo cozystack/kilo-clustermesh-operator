@@ -13,6 +13,7 @@ rules:
       - get
       - list
       - watch
+      - patch
   # ClusterMesh CRs and the Secrets they reference are watched cluster-wide
   # so users can colocate them with the Kamaji-managed tenant kubeconfig
   # Secrets in any namespace (typically `tenant-root` for Cozystack).

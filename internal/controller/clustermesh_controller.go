@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	v1alpha1 "github.com/squat/kilo-clustermesh-operator/api/v1alpha1"
+	"github.com/squat/kilo-clustermesh-operator/internal/kilonode"
 	"github.com/squat/kilo-clustermesh-operator/internal/multicluster"
 	"github.com/squat/kilo-clustermesh-operator/internal/peer"
 	"github.com/squat/kilo-clustermesh-operator/internal/validation"
@@ -45,7 +46,7 @@ const finalizerName = "kilo-clustermesh.io/cleanup"
 // +kubebuilder:rbac:groups=kilo.squat.ai,resources=clustermeshes/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=kilo.squat.ai,resources=clustermeshes/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch;patch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=kilo.squat.ai,resources=peers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,verbs=get;create;update
@@ -201,6 +202,8 @@ func (r *ClusterMeshReconciler) reconcileAllClusters(ctx context.Context, log *s
 			return nil, errors.Wrapf(err, "listing nodes for cluster %q", srcEntry.Name)
 		}
 
+		r.ensureNodeEndpoints(ctx, log, srcClient, srcEntry, nodes)
+
 		validNodes, skipped := r.filterNodes(log, mesh, nodes, srcEntry)
 		status := v1alpha1.ClusterStatus{Name: srcEntry.Name, SkippedNodes: skipped}
 
@@ -213,6 +216,41 @@ func (r *ClusterMeshReconciler) reconcileAllClusters(ctx context.Context, log *s
 	}
 
 	return statuses, nil
+}
+
+// ensureNodeEndpoints derives a kilo.squat.ai/force-endpoint annotation
+// from each node's InternalIPv4 when no other endpoint source is available
+// and writes it back into the source cluster. This removes the need for an
+// operator-installed per-cluster annotator DaemonSet: every cluster
+// referenced by a ClusterMesh resource is reachable via the same
+// kubeconfig the operator already uses to publish Peer objects.
+//
+// Patch failures are logged and skipped, not propagated, because the
+// reconciler still has useful work to do on the cluster pair even if
+// a single node can't be annotated.
+func (r *ClusterMeshReconciler) ensureNodeEndpoints(ctx context.Context, log *slog.Logger, srcClient client.Client, srcEntry *v1alpha1.ClusterEntry, nodes []corev1.Node) {
+	for i := range nodes {
+		node := &nodes[i]
+
+		patched, err := kilonode.EnsureForceEndpoint(ctx, srcClient, node, srcEntry.WireguardPort)
+		if err != nil {
+			log.Warn("failed to set force-endpoint annotation",
+				slog.String("cluster", srcEntry.Name),
+				slog.String("node", node.Name),
+				slog.String("error", err.Error()),
+			)
+
+			continue
+		}
+
+		if patched {
+			log.Info("set force-endpoint annotation",
+				slog.String("cluster", srcEntry.Name),
+				slog.String("node", node.Name),
+				slog.String("endpoint", node.Annotations[kilonode.AnnotationForceEndpoint]),
+			)
+		}
+	}
 }
 
 // filterNodes validates nodes and returns valid nodes and the count of skipped ones.
