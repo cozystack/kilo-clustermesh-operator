@@ -100,7 +100,7 @@ func (d *directCluster) GetEventRecorder(_ string) k8sevents.EventRecorder {
 // so the originating namespace is the only place the Secret can be read
 // from.
 type EntrySource struct {
-	Entry          v1alpha1.ClusterEntry
+	Entry         v1alpha1.ClusterEntry
 	MeshNamespace string
 }
 
@@ -119,7 +119,8 @@ func Build(
 		clusters: make(map[string]cluster.Cluster, len(entries)),
 	}
 
-	for _, src := range entries {
+	for i := range entries {
+		src := &entries[i]
 		entry := src.Entry
 
 		cfg, err := configForEntry(ctx, &entry, localCfg, src.MeshNamespace, kubeClient)
