@@ -184,15 +184,20 @@ func (r *ClusterMeshReconciler) cleanupStaleSourceClusters(ctx context.Context, 
 
 		// Per-target deadline so one unreachable cluster cannot stall the
 		// whole reconcile pass — see cleanupSweepTimeout for the rationale.
-		sweepCtx, cancel := context.WithTimeout(ctx, cleanupSweepTimeout)
-		err := peer.DeleteStaleSourceClusters(sweepCtx, tgtClient, mesh.Name, sources)
-		cancel()
-		if err != nil {
-			log.Warn("cleaning stale source-cluster peers",
-				slog.String("target", name),
-				slog.String("error", err.Error()),
-			)
-		}
+		// Anonymous function so defer cancel() fires per iteration instead
+		// of waiting for the enclosing reconcile to return.
+		func() {
+			sweepCtx, cancel := context.WithTimeout(ctx, cleanupSweepTimeout)
+			defer cancel()
+
+			err := peer.DeleteStaleSourceClusters(sweepCtx, tgtClient, mesh.Name, sources)
+			if err != nil {
+				log.Warn("cleaning stale source-cluster peers",
+					slog.String("target", name),
+					slog.String("error", err.Error()),
+				)
+			}
+		}()
 	}
 }
 
@@ -229,10 +234,14 @@ func (r *ClusterMeshReconciler) cleanupOrphanMeshPeers(ctx context.Context, log 
 		}
 
 		// Per-target deadline so one unreachable cluster cannot stall the
-		// whole reconcile pass — see cleanupSweepTimeout.
-		sweepCtx, cancel := context.WithTimeout(ctx, cleanupSweepTimeout)
-		r.sweepOrphanPeersInCluster(sweepCtx, log, clusterName, tgtClient, living)
-		cancel()
+		// whole reconcile pass — see cleanupSweepTimeout. Wrapped in an
+		// anonymous function so defer cancel() fires per iteration.
+		func() {
+			sweepCtx, cancel := context.WithTimeout(ctx, cleanupSweepTimeout)
+			defer cancel()
+
+			r.sweepOrphanPeersInCluster(sweepCtx, log, clusterName, tgtClient, living)
+		}()
 	}
 
 	// `namespace` is currently unused — see collectLivingMeshes for the
