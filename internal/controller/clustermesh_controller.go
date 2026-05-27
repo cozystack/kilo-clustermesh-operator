@@ -206,6 +206,26 @@ func (r *ClusterMeshReconciler) cleanupStaleSourceClusters(ctx context.Context, 
 // Failures are logged and swallowed: each peer is deleted independently and
 // a single client error must not abort the whole pass.
 func (r *ClusterMeshReconciler) cleanupOrphanMeshPeers(ctx context.Context, log *slog.Logger, namespace string) {
+	living, ok := r.collectLivingMeshes(ctx, log, namespace)
+	if !ok {
+		return
+	}
+
+	for _, clusterName := range r.Registry.Clusters() {
+		tgtClient, present := r.Registry.Client(clusterName)
+		if !present {
+			continue
+		}
+
+		r.sweepOrphanPeersInCluster(ctx, log, clusterName, tgtClient, living)
+	}
+}
+
+// collectLivingMeshes returns the names of every ClusterMesh in the given
+// namespace, used by the orphan sweep to decide which mesh labels are still
+// owned. ok==false indicates the list call itself failed; caller should
+// bail without deleting anything.
+func (r *ClusterMeshReconciler) collectLivingMeshes(ctx context.Context, log *slog.Logger, namespace string) (map[string]struct{}, bool) {
 	var meshes v1alpha1.ClusterMeshList
 
 	err := r.List(ctx, &meshes, client.InNamespace(namespace))
@@ -215,7 +235,7 @@ func (r *ClusterMeshReconciler) cleanupOrphanMeshPeers(ctx context.Context, log 
 			slog.String("error", err.Error()),
 		)
 
-		return
+		return nil, false
 	}
 
 	living := make(map[string]struct{}, len(meshes.Items))
@@ -223,53 +243,54 @@ func (r *ClusterMeshReconciler) cleanupOrphanMeshPeers(ctx context.Context, log 
 		living[meshes.Items[i].Name] = struct{}{}
 	}
 
-	for _, clusterName := range r.Registry.Clusters() {
-		tgtClient, ok := r.Registry.Client(clusterName)
-		if !ok {
+	return living, true
+}
+
+// sweepOrphanPeersInCluster lists every Peer in a target cluster and deletes
+// those whose kilo-clustermesh.io/mesh label names a mesh not in living.
+// Listing or per-peer delete failures are logged and the sweep continues
+// with the remaining peers.
+func (r *ClusterMeshReconciler) sweepOrphanPeersInCluster(ctx context.Context, log *slog.Logger, clusterName string, tgtClient client.Client, living map[string]struct{}) {
+	var peers kilov1alpha1.PeerList
+
+	err := tgtClient.List(ctx, &peers)
+	if err != nil {
+		log.Warn("listing peers for orphan sweep",
+			slog.String("target", clusterName),
+			slog.String("error", err.Error()),
+		)
+
+		return
+	}
+
+	for i := range peers.Items {
+		peerObj := &peers.Items[i]
+
+		meshLabel := peerObj.Labels[peer.LabelMesh]
+		if meshLabel == "" {
 			continue
 		}
 
-		var peers kilov1alpha1.PeerList
-
-		err := tgtClient.List(ctx, &peers)
-		if err != nil {
-			log.Warn("listing peers for orphan sweep",
-				slog.String("target", clusterName),
-				slog.String("error", err.Error()),
-			)
-
+		if _, alive := living[meshLabel]; alive {
 			continue
 		}
 
-		for i := range peers.Items {
-			peerObj := &peers.Items[i]
-
-			meshLabel := peerObj.Labels[peer.LabelMesh]
-			if meshLabel == "" {
-				continue
-			}
-
-			if _, alive := living[meshLabel]; alive {
-				continue
-			}
-
-			deleteErr := tgtClient.Delete(ctx, peerObj)
-			if deleteErr != nil && !apierrors.IsNotFound(deleteErr) {
-				log.Warn("deleting orphan peer",
-					slog.String("target", clusterName),
-					slog.String("peer", peerObj.Name),
-					slog.String("error", deleteErr.Error()),
-				)
-
-				continue
-			}
-
-			log.Info("deleted orphan peer whose ClusterMesh CR no longer exists",
+		deleteErr := tgtClient.Delete(ctx, peerObj)
+		if deleteErr != nil && !apierrors.IsNotFound(deleteErr) {
+			log.Warn("deleting orphan peer",
 				slog.String("target", clusterName),
 				slog.String("peer", peerObj.Name),
-				slog.String("orphan-mesh", meshLabel),
+				slog.String("error", deleteErr.Error()),
 			)
+
+			continue
 		}
+
+		log.Info("deleted orphan peer whose ClusterMesh CR no longer exists",
+			slog.String("target", clusterName),
+			slog.String("peer", peerObj.Name),
+			slog.String("orphan-mesh", meshLabel),
+		)
 	}
 }
 

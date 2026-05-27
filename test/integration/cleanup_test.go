@@ -157,8 +157,12 @@ func TestCleanupStaleSourceClusters_SweepsClustersOutsideSpec(t *testing.T) {
 }
 
 // TestCleanupStaleSourceClusters_IgnoresPeersFromOtherMeshes verifies that
-// peers labeled for a different ClusterMesh are not touched, even if their
-// source-cluster is unknown to this mesh.
+// peers labeled for a different but LIVING ClusterMesh are not touched by
+// the per-source sweep, even if their source-cluster is unknown to the
+// reconciling mesh. The foreign mesh must exist as a CR — otherwise the
+// orphan-mesh sweep (a separate defense-in-depth pass) would legitimately
+// delete it, and that property is covered by
+// TestCleanupOrphanMeshPeers_DeletesGhostsAfterCRGone.
 func TestCleanupStaleSourceClusters_IgnoresPeersFromOtherMeshes(t *testing.T) {
 	ctx := context.Background()
 
@@ -166,12 +170,23 @@ func TestCleanupStaleSourceClusters_IgnoresPeersFromOtherMeshes(t *testing.T) {
 	createMesh(t, mesh)
 	t.Cleanup(func() { deleteMesh(t, mesh) })
 
-	// Peer belongs to a different mesh; even though its source-cluster is
-	// nonsensical from our mesh's point of view, we must not touch it.
+	// Sibling ClusterMesh CR that "owns" the foreign peer below. Keeping it
+	// alive in the namespace ensures the orphan-mesh sweep treats its peer
+	// label as legitimate and does not delete it; the property under test
+	// is per-CR isolation of the source-cluster sweep, not orphan handling.
+	sibling := simpleMeshSpec("cleanup-isolation-sibling-mesh", "default")
+	createMesh(t, sibling)
+	t.Cleanup(func() { deleteMesh(t, sibling) })
+
+	// Peer belongs to the sibling mesh; the reconciling mesh
+	// (cleanup-isolation-mesh) must not delete it even though its
+	// source-cluster ("ghost-cluster") is not part of cleanup-isolation-mesh's
+	// spec — the per-source sweep is scoped to peers labelled with the
+	// reconciling mesh, not foreign ones.
 	foreignPeer := &kilov1alpha1.Peer{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   "foreign--ghost--node",
-			Labels: peer.Labels("some-other-mesh", "ghost-cluster"),
+			Labels: peer.Labels(sibling.Name, "ghost-cluster"),
 		},
 		Spec: kilov1alpha1.PeerSpec{
 			AllowedIPs: []string{"10.50.0.0/16"},
@@ -263,6 +278,9 @@ func TestCleanupOrphanMeshPeers_LeavesPeersOfLivingMeshAlone(t *testing.T) {
 	// — the survivor must remain because its mesh label points at a
 	// living CR.
 	require.NoError(t, globalEnv.localClient.Create(ctx, survivor))
+	t.Cleanup(func() {
+		_ = globalEnv.localClient.Delete(ctx, survivor)
+	})
 
 	mustReconcile(t, live)
 	mustReconcile(t, live)
