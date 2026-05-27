@@ -66,12 +66,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
-      - name: Log in to GHCR
+      - name: Log in to GHCR (helm)
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | \
             helm registry login ghcr.io \
               --username "${{ github.actor }}" \
               --password-stdin
+      # flux push artifact uses docker's config.json for OCI auth, separate
+      # from helm's own keyring. Without this step the bundle push gets
+      # `DENIED: requested access to the resource is denied`.
+      - name: Log in to GHCR (docker)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Package and push operator chart
         run: |
           # Push under /charts/ subpath so the chart's OCI repository does
@@ -94,7 +103,7 @@ jobs:
       # ArtifactGenerator from the PackageSource (init.yaml) and unblocks
       # the install via Package -> HelmRelease.
       - name: Install flux CLI
-        uses: fluxcd/flux2/action@main
+        uses: fluxcd/flux2/action@v2.8.8
       - name: Compute bundle tag
         id: bundletag
         run: |
@@ -108,10 +117,9 @@ jobs:
       - name: Push Cozystack package bundle
         run: |
           # The wrapper chart at packages/system/kilo-clustermesh-operator
-          # depends on the operator chart at charts/. The dependency tarball
-          # must live inside the wrapper before the bundle is pushed so the
-          # extracted artifact is self-contained.
-          helm dependency update packages/system/kilo-clustermesh-operator
+          # already has its dependency tarball populated by the preceding
+          # "Package and push Cozystack package" step, so the extracted
+          # artifact is self-contained.
           flux push artifact \
             "oci://ghcr.io/${{ github.repository_owner }}/kilo-clustermesh-operator-packages:${{ steps.bundletag.outputs.value }}" \
             --path=packages \
