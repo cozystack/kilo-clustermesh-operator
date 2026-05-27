@@ -122,7 +122,7 @@ func run() error {
 		}
 	}
 
-	if err := wireReconciler(mgr, registry, slogger); err != nil {
+	if err := wireReconciler(mgr, registry, slogger, cancel); err != nil {
 		return err
 	}
 
@@ -313,13 +313,14 @@ func newManager(cfg *rest.Config, opts *runtimeOpts) (manager.Manager, error) {
 	return mgr, errors.Wrap(err, "creating manager")
 }
 
-func wireReconciler(mgr manager.Manager, registry *multicluster.ClusterRegistry, slogger *slog.Logger) error {
+func wireReconciler(mgr manager.Manager, registry *multicluster.ClusterRegistry, slogger *slog.Logger, cancel context.CancelFunc) error {
 	r := &controller.ClusterMeshReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
 		Registry: registry,
 		Log:      slogger,
 		Recorder: mgr.GetEventRecorder(controllerEventName),
+		Cancel:   cancel,
 	}
 
 	return errors.Wrap(r.SetupWithManager(mgr), "registering ClusterMesh reconciler")
