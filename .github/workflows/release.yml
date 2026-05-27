@@ -103,7 +103,7 @@ jobs:
       # ArtifactGenerator from the PackageSource (init.yaml) and unblocks
       # the install via Package -> HelmRelease.
       - name: Install flux CLI
-        uses: fluxcd/flux2/action@main
+        uses: fluxcd/flux2/action@v2.8.8
       - name: Compute bundle tag
         id: bundletag
         run: |
@@ -117,10 +117,9 @@ jobs:
       - name: Push Cozystack package bundle
         run: |
           # The wrapper chart at packages/system/kilo-clustermesh-operator
-          # depends on the operator chart at charts/. The dependency tarball
-          # must live inside the wrapper before the bundle is pushed so the
-          # extracted artifact is self-contained.
-          helm dependency update packages/system/kilo-clustermesh-operator
+          # already has its dependency tarball populated by the preceding
+          # "Package and push Cozystack package" step, so the extracted
+          # artifact is self-contained.
           flux push artifact \
             "oci://ghcr.io/${{ github.repository_owner }}/kilo-clustermesh-operator-packages:${{ steps.bundletag.outputs.value }}" \
             --path=packages \
