@@ -124,22 +124,29 @@ func (r *ClusterMeshReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return errors.Wrap(err, "building clustermesh controller")
 }
 
-// cleanupStaleSourceClusters walks every cluster currently present in the
-// mesh's spec and asks each one to drop any Peer it holds whose
-// source-cluster label points at a cluster no longer in the spec. Failures
-// are logged and swallowed: a stale peer not deleted this tick will be
-// retried on the next reconcile, and we should not block the rest of the
-// status update on a single client error.
+// cleanupStaleSourceClusters walks every cluster the operator knows about
+// (the merged registry built from all ClusterMesh resources, not just this
+// mesh's current spec) and asks each one to drop any Peer it holds whose
+// source-cluster label points at a cluster no longer in this mesh's
+// spec.Clusters.
+//
+// Visiting only this mesh's current spec misses peers that were pushed
+// into a cluster that has since been removed from spec but is still
+// reachable via another ClusterMesh's kubeconfig. Reaching every cluster
+// in the registry closes both halves of the gap: removed source-clusters
+// and removed target-clusters.
+//
+// Failures are logged and swallowed: a stale peer not deleted this tick
+// will be retried on the next reconcile, and we should not block the rest
+// of the status update on a single client error.
 func (r *ClusterMeshReconciler) cleanupStaleSourceClusters(ctx context.Context, log *slog.Logger, mesh *v1alpha1.ClusterMesh) {
 	validSources := make([]string, 0, len(mesh.Spec.Clusters))
 	for i := range mesh.Spec.Clusters {
 		validSources = append(validSources, mesh.Spec.Clusters[i].Name)
 	}
 
-	for i := range mesh.Spec.Clusters {
-		tgtEntry := &mesh.Spec.Clusters[i]
-
-		tgtClient, ok := r.Registry.Client(tgtEntry.Name)
+	for _, name := range r.Registry.Clusters() {
+		tgtClient, ok := r.Registry.Client(name)
 		if !ok {
 			continue
 		}
@@ -147,7 +154,7 @@ func (r *ClusterMeshReconciler) cleanupStaleSourceClusters(ctx context.Context, 
 		err := peer.DeleteStaleSourceClusters(ctx, tgtClient, mesh.Name, validSources)
 		if err != nil {
 			log.Warn("cleaning stale source-cluster peers",
-				slog.String("target", tgtEntry.Name),
+				slog.String("target", name),
 				slog.String("error", err.Error()),
 			)
 		}

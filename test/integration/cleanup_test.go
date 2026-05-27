@@ -25,6 +25,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	v1alpha1 "github.com/squat/kilo-clustermesh-operator/api/v1alpha1"
 	"github.com/squat/kilo-clustermesh-operator/internal/peer"
 	kilov1alpha1 "github.com/squat/kilo-clustermesh-operator/pkg/kilo/v1alpha1"
 )
@@ -98,6 +99,62 @@ func TestCleanupStaleSourceClusters_RemovesPeersOfRemovedCluster(t *testing.T) {
 // per-pair ReconcilePeers sweep (independent of the new cleanup) computes
 // desired=[] and removes the planted peer as an in-pair orphan, masking the
 // behaviour this layer is meant to verify.
+
+// TestCleanupStaleSourceClusters_SweepsClustersOutsideSpec verifies the
+// cross-CR cleanup property: a peer left in a cluster that is in the
+// operator's registry (because another ClusterMesh names it) but is NOT in
+// THIS mesh's spec.Clusters must still be swept. This is the case that
+// breaks when cleanup only walks spec.Clusters: the "removed target" half
+// of the stale-peer problem.
+//
+// Setup: this mesh's spec contains only "local". The registry, however,
+// also has "remote" (in real life from a sibling ClusterMesh). A peer
+// labeled for this mesh sits in remote with a source-cluster that is not
+// in this mesh's spec. The reconcile must reach into remote and delete it.
+func TestCleanupStaleSourceClusters_SweepsClustersOutsideSpec(t *testing.T) {
+	ctx := context.Background()
+
+	// Spec contains ONLY local; remote is reachable via the registry but
+	// not referenced by this mesh.
+	mesh := &v1alpha1.ClusterMesh{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cleanup-cross-cr-mesh",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.ClusterMeshSpec{
+			Clusters: []v1alpha1.ClusterEntry{
+				{
+					Name:          "local",
+					Local:         true,
+					PodCIDRs:      []string{"10.1.0.0/16"},
+					WireguardCIDR: "10.100.0.0/24",
+				},
+			},
+		},
+	}
+	createMesh(t, mesh)
+	t.Cleanup(func() { deleteMesh(t, mesh) })
+
+	// Plant a peer in remote whose source-cluster is not in this mesh's
+	// spec. Without cross-cluster sweep, reconcile would never visit
+	// remote (it's not in spec) and the peer would persist forever.
+	stalePeer := &kilov1alpha1.Peer{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "stale--ghost--in-remote",
+			Labels: peer.Labels(mesh.Name, "ghost-cluster"),
+		},
+		Spec: kilov1alpha1.PeerSpec{
+			AllowedIPs: []string{"10.77.0.0/16"},
+			PublicKey:  "pubkey-stale-cross-cr",
+		},
+	}
+	require.NoError(t, globalEnv.remoteClient.Create(ctx, stalePeer))
+
+	mustReconcile(t, mesh)
+	mustReconcile(t, mesh)
+
+	assertPeerExists(t, globalEnv.remoteClient, "stale--ghost--in-remote", false)
+}
 
 // TestCleanupStaleSourceClusters_IgnoresPeersFromOtherMeshes verifies that
 // peers labeled for a different ClusterMesh are not touched, even if their
