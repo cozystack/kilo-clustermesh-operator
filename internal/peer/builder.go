@@ -69,6 +69,14 @@ func BuildPeer(meshName string, entry *v1alpha1.ClusterEntry, node *corev1.Node,
 		return nil, errors.Wrapf(err, "node %q has invalid wireguard-ip annotation %q", node.Name, wgIP)
 	}
 
+	// PodCIDRs is populated by the kube-controller-manager once it allocates
+	// a CIDR for the node; until then BuildPeer would panic on the indexing
+	// below. Surface this as a clean error so the reconciler skips the
+	// node via validation rather than crashloop the operator.
+	if len(node.Spec.PodCIDRs) == 0 {
+		return nil, errors.Newf("node %q has no PodCIDRs allocated yet", node.Name)
+	}
+
 	allowedIPs := make([]string, 0, 2+len(extraAllowedIPs))
 	allowedIPs = append(allowedIPs, node.Spec.PodCIDRs[0], netutil.HostRoute(hostIP))
 	allowedIPs = append(allowedIPs, extraAllowedIPs...)

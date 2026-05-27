@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"github.com/cockroachdb/errors"
 	corev1 "k8s.io/api/core/v1"
@@ -133,6 +134,12 @@ func (r *ClusterMeshReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return errors.Wrap(err, "building clustermesh controller")
 }
 
+// cleanupSweepTimeout caps the per-target list/delete pass time so a single
+// unreachable or slow cluster does not block the whole reconcile loop. The
+// reconciler retries on every tick anyway, so a brief budget is enough to
+// either make progress or move on.
+const cleanupSweepTimeout = 5 * time.Second
+
 // cleanupStaleSourceClusters walks every cluster the operator knows about
 // (the merged registry built from all ClusterMesh resources, not just this
 // mesh's current spec) and removes Peer objects this mesh has no business
@@ -175,7 +182,13 @@ func (r *ClusterMeshReconciler) cleanupStaleSourceClusters(ctx context.Context, 
 			sources = nil
 		}
 
-		err := peer.DeleteStaleSourceClusters(ctx, tgtClient, mesh.Name, sources)
+		// Per-target deadline so one unreachable cluster cannot stall the
+		// whole reconcile pass — see cleanupSweepTimeout for the rationale.
+		sweepCtx, cancel := context.WithTimeout(ctx, cleanupSweepTimeout)
+
+		err := peer.DeleteStaleSourceClusters(sweepCtx, tgtClient, mesh.Name, sources)
+		cancel()
+
 		if err != nil {
 			log.Warn("cleaning stale source-cluster peers",
 				slog.String("target", name),
@@ -206,7 +219,7 @@ func (r *ClusterMeshReconciler) cleanupStaleSourceClusters(ctx context.Context, 
 // Failures are logged and swallowed: each peer is deleted independently and
 // a single client error must not abort the whole pass.
 func (r *ClusterMeshReconciler) cleanupOrphanMeshPeers(ctx context.Context, log *slog.Logger, namespace string) {
-	living, ok := r.collectLivingMeshes(ctx, log, namespace)
+	living, ok := r.collectLivingMeshes(ctx, log)
 	if !ok {
 		return
 	}
@@ -217,21 +230,34 @@ func (r *ClusterMeshReconciler) cleanupOrphanMeshPeers(ctx context.Context, log 
 			continue
 		}
 
-		r.sweepOrphanPeersInCluster(ctx, log, clusterName, tgtClient, living)
+		// Per-target deadline so one unreachable cluster cannot stall the
+		// whole reconcile pass — see cleanupSweepTimeout.
+		sweepCtx, cancel := context.WithTimeout(ctx, cleanupSweepTimeout)
+		r.sweepOrphanPeersInCluster(sweepCtx, log, clusterName, tgtClient, living)
+		cancel()
 	}
+
+	// `namespace` is currently unused — see collectLivingMeshes for the
+	// reasoning. Keeping the parameter on the function signature documents
+	// the reconciling-mesh context for future per-namespace heuristics and
+	// avoids breaking the small set of internal call sites.
+	_ = namespace
 }
 
-// collectLivingMeshes returns the names of every ClusterMesh in the given
-// namespace, used by the orphan sweep to decide which mesh labels are still
-// owned. ok==false indicates the list call itself failed; caller should
-// bail without deleting anything.
-func (r *ClusterMeshReconciler) collectLivingMeshes(ctx context.Context, log *slog.Logger, namespace string) (map[string]struct{}, bool) {
+// collectLivingMeshes returns the names of every ClusterMesh in the cluster,
+// not just the reconciler's own namespace. The operator builds its registry
+// cluster-wide (cmd.buildInitialRegistry merges entries from every
+// ClusterMesh it sees), so a target cluster's Peer labelled mesh=foo could
+// legitimately belong to a foo CR in any namespace — narrowing the lookup
+// to one namespace would let the orphan sweep delete a peer owned by a
+// living foo CR sitting elsewhere. ok==false indicates the list call itself
+// failed; caller should bail without deleting anything.
+func (r *ClusterMeshReconciler) collectLivingMeshes(ctx context.Context, log *slog.Logger) (map[string]struct{}, bool) {
 	var meshes v1alpha1.ClusterMeshList
 
-	err := r.List(ctx, &meshes, client.InNamespace(namespace))
+	err := r.List(ctx, &meshes)
 	if err != nil {
 		log.Warn("listing meshes for orphan sweep",
-			slog.String("namespace", namespace),
 			slog.String("error", err.Error()),
 		)
 
