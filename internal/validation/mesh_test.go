@@ -216,6 +216,43 @@ func TestValidateMeshNetworks(t *testing.T) {
 			wantErr:     true,
 			errContains: []string{"cluster-a", "cluster-b"},
 		},
+		{
+			// hub-and-spoke topology: one shared cluster ("ceph") participates in
+			// two independent meshes pairing it with different tenants. Its CIDRs
+			// appear identically in both ClusterMesh resources by design and must
+			// not be flagged as cross-mesh overlap. Intra-mesh checks within each
+			// mesh still ensure tenant CIDRs do not collide with the hub.
+			name: "shared hub cluster in two meshes is not an overlap",
+			meshes: []v1alpha1.ClusterMesh{
+				makeMesh("mesh-a-ceph",
+					makeCluster("tenant-a", "10.0.0.0/16", "10.4.0.0/24", "10.96.0.0/16"),
+					makeCluster("ceph", "10.247.0.0/16", "100.66.0.0/16", "10.99.0.0/16"),
+				),
+				makeMesh("mesh-b-ceph",
+					makeCluster("tenant-b", "10.1.0.0/16", "10.4.1.0/24", "10.112.0.0/16"),
+					makeCluster("ceph", "10.247.0.0/16", "100.66.0.0/16", "10.99.0.0/16"),
+				),
+			},
+			wantErr: false,
+		},
+		{
+			// Two different tenants accidentally pick the same pod CIDR; the
+			// shared-cluster-name exception MUST NOT mask this conflict because
+			// the colliding entries belong to different clusters.
+			name: "different clusters with same pod CIDR across meshes still flagged",
+			meshes: []v1alpha1.ClusterMesh{
+				makeMesh("mesh-a",
+					makeCluster("tenant-a", "10.0.0.0/16", "10.4.0.0/24", "10.96.0.0/16"),
+					makeCluster("ceph", "10.247.0.0/16", "100.66.0.0/16", "10.99.0.0/16"),
+				),
+				makeMesh("mesh-b",
+					makeCluster("tenant-b", "10.0.0.0/16", "10.4.1.0/24", "10.112.0.0/16"),
+					makeCluster("ceph", "10.247.0.0/16", "100.66.0.0/16", "10.99.0.0/16"),
+				),
+			},
+			wantErr:     true,
+			errContains: []string{"mesh-a", "mesh-b", "tenant-a", "tenant-b"},
+		},
 	}
 
 	for _, testCase := range tests {

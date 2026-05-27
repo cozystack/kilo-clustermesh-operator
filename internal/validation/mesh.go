@@ -62,10 +62,24 @@ func parseClusters(clusters []v1alpha1.ClusterEntry) ([]parsedCIDR, error) {
 // CIDRs. Returns an error describing the first overlap found, or nil if all
 // CIDRs are disjoint. The meshA and meshB parameters are used to enrich the
 // error message; pass the same value (or "") for intra-mesh checks.
+//
+// In cross-mesh mode (meshA != meshB), CIDRs whose owning cluster names are
+// identical are skipped: the same cluster legitimately appears in multiple
+// ClusterMesh resources when it acts as a hub shared between independent
+// spokes (e.g. one ceph cluster paired with two different tenants), and its
+// own CIDRs would otherwise be flagged as "overlapping with themselves"
+// across meshes. Intra-mesh checks (meshA == meshB) still enforce overlap
+// across a single cluster's own CIDRs (e.g. podCIDR vs serviceCIDR).
 func checkOverlaps(cidrs []parsedCIDR, meshA, meshB string) error {
+	crossMesh := meshA != "" && meshA != meshB
+
 	for i := range cidrs {
 		for j := i + 1; j < len(cidrs); j++ {
 			cidrA, cidrB := cidrs[i], cidrs[j]
+
+			if crossMesh && cidrA.cluster == cidrB.cluster {
+				continue
+			}
 
 			if !netutil.CIDROverlaps(cidrA.net, cidrB.net) {
 				continue
