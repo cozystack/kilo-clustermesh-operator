@@ -126,23 +126,30 @@ func (r *ClusterMeshReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 // cleanupStaleSourceClusters walks every cluster the operator knows about
 // (the merged registry built from all ClusterMesh resources, not just this
-// mesh's current spec) and asks each one to drop any Peer it holds whose
-// source-cluster label points at a cluster no longer in this mesh's
-// spec.Clusters.
+// mesh's current spec) and removes Peer objects this mesh has no business
+// owning anymore. Two situations are swept:
 //
-// Visiting only this mesh's current spec misses peers that were pushed
-// into a cluster that has since been removed from spec but is still
-// reachable via another ClusterMesh's kubeconfig. Reaching every cluster
-// in the registry closes both halves of the gap: removed source-clusters
-// and removed target-clusters.
+//   - target cluster was removed from this mesh's spec.Clusters: the mesh
+//     should hold no peers at all in that cluster, so every Peer labeled
+//     with this mesh's name is deleted there.
 //
+//   - target cluster is still in spec: only Peers whose source-cluster
+//     label points at a cluster no longer in spec are deleted.
+//
+// Visiting only the current spec.Clusters misses the first case — a peer
+// pushed into a now-removed target stays reachable via another
+// ClusterMesh's kubeconfig and would otherwise never be touched again.
 // Failures are logged and swallowed: a stale peer not deleted this tick
 // will be retried on the next reconcile, and we should not block the rest
 // of the status update on a single client error.
 func (r *ClusterMeshReconciler) cleanupStaleSourceClusters(ctx context.Context, log *slog.Logger, mesh *v1alpha1.ClusterMesh) {
 	validSources := make([]string, 0, len(mesh.Spec.Clusters))
+	validSet := make(map[string]struct{}, len(mesh.Spec.Clusters))
+
 	for i := range mesh.Spec.Clusters {
-		validSources = append(validSources, mesh.Spec.Clusters[i].Name)
+		name := mesh.Spec.Clusters[i].Name
+		validSources = append(validSources, name)
+		validSet[name] = struct{}{}
 	}
 
 	for _, name := range r.Registry.Clusters() {
@@ -151,7 +158,15 @@ func (r *ClusterMeshReconciler) cleanupStaleSourceClusters(ctx context.Context, 
 			continue
 		}
 
-		err := peer.DeleteStaleSourceClusters(ctx, tgtClient, mesh.Name, validSources)
+		// Target cluster not in this mesh's spec → drop every Peer this
+		// mesh owns there. Target still in spec → keep peers whose source
+		// is still in spec, drop the rest.
+		sources := validSources
+		if _, inSpec := validSet[name]; !inSpec {
+			sources = nil
+		}
+
+		err := peer.DeleteStaleSourceClusters(ctx, tgtClient, mesh.Name, sources)
 		if err != nil {
 			log.Warn("cleaning stale source-cluster peers",
 				slog.String("target", name),
