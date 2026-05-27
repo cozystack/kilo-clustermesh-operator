@@ -491,23 +491,32 @@ func (r *ClusterMeshReconciler) updateStatus(ctx context.Context, mesh *v1alpha1
 	return errors.Wrap(r.Status().Update(ctx, mesh), "updating status")
 }
 
-// buildDesiredPeers constructs the desired Peer slice for all valid nodes plus an optional anchor.
+// buildDesiredPeers constructs the desired Peer slice for all valid nodes.
+// The first valid node carries the cluster-wide CIDRs (serviceCIDR and any
+// AdditionalCIDRs) folded into its Peer.AllowedIPs. The older design emitted
+// a separate anchor Peer that reused the anchor node's WireGuard public key;
+// WireGuard's per-pubkey dedup made the second `wg setconf` call to apply
+// either the node or the anchor entry clobber the AllowedIPs of the other,
+// silently losing pod-CIDR or service-CIDR routing in a racy way. Folding
+// the anchor CIDRs into the first node Peer keeps a single WG peer entry
+// per pubkey with the full union of AllowedIPs.
 func buildDesiredPeers(meshName string, entry *v1alpha1.ClusterEntry, nodes []*corev1.Node) ([]*kilov1alpha1.Peer, error) {
-	peers := make([]*kilov1alpha1.Peer, 0, len(nodes)+1)
+	peers := make([]*kilov1alpha1.Peer, 0, len(nodes))
 
-	for _, node := range nodes {
-		p, err := peer.BuildPeer(meshName, entry, node)
+	anchorExtras := peer.CollectAnchorCIDRs(entry)
+
+	for i, node := range nodes {
+		var extras []string
+		if i == 0 {
+			extras = anchorExtras
+		}
+
+		p, err := peer.BuildPeer(meshName, entry, node, extras)
 		if err != nil {
 			return nil, errors.Wrapf(err, "building peer for node %q", node.Name)
 		}
 
 		peers = append(peers, p)
-	}
-
-	if len(nodes) > 0 {
-		if anchor := peer.BuildAnchorPeer(meshName, entry, nodes[0]); anchor != nil {
-			peers = append(peers, anchor)
-		}
 	}
 
 	return peers, nil

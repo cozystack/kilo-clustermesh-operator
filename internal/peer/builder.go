@@ -32,8 +32,25 @@ import (
 )
 
 // BuildPeer constructs a Peer object from a validated Node.
-// The Peer's allowedIPs = node's PodCIDRs[0] + /32 (or /128) host route derived from the wireguard-ip annotation.
-func BuildPeer(meshName string, entry *v1alpha1.ClusterEntry, node *corev1.Node) (*kilov1alpha1.Peer, error) {
+//
+// The Peer's AllowedIPs always include the node's PodCIDR plus a /32 (or
+// /128) host route derived from its kilo.squat.ai/wireguard-ip annotation.
+//
+// extraAllowedIPs lets the caller fold cluster-wide CIDRs (serviceCIDR and
+// any AdditionalCIDRs declared on the ClusterEntry) into the first valid
+// node's Peer. This replaces the old "anchor Peer" pattern, which emitted
+// a SEPARATE Peer object reusing the anchor node's public key. WireGuard
+// identifies peers exclusively by their public key and keeps only one
+// peer entry per pubkey: the second `wg setconf` call either dropped the
+// node peer's AllowedIPs (so pod-CIDR routing disappeared) or dropped the
+// anchor's (so service-CIDR routing disappeared), depending on apply
+// order. The resulting outage on the receiving cluster was racy and
+// could survive across reconciles. Folding the cluster-wide CIDRs into
+// the node peer guarantees one WG peer entry per pubkey with the full
+// union of AllowedIPs, so neither half can clobber the other.
+//
+// extraAllowedIPs may be nil for non-anchor nodes.
+func BuildPeer(meshName string, entry *v1alpha1.ClusterEntry, node *corev1.Node, extraAllowedIPs []string) (*kilov1alpha1.Peer, error) {
 	pubKey := node.Annotations[kilonode.AnnotationPublicKey]
 	if pubKey == "" {
 		return nil, errors.Newf("node %q has no public key annotation", node.Name)
@@ -52,7 +69,9 @@ func BuildPeer(meshName string, entry *v1alpha1.ClusterEntry, node *corev1.Node)
 		return nil, errors.Wrapf(err, "node %q has invalid wireguard-ip annotation %q", node.Name, wgIP)
 	}
 
-	allowedIPs := []string{node.Spec.PodCIDRs[0], netutil.HostRoute(hostIP)}
+	allowedIPs := make([]string, 0, 2+len(extraAllowedIPs))
+	allowedIPs = append(allowedIPs, node.Spec.PodCIDRs[0], netutil.HostRoute(hostIP))
+	allowedIPs = append(allowedIPs, extraAllowedIPs...)
 
 	endpoint, err := resolvePeerEndpoint(node, entry.WireguardPort)
 	if err != nil {
@@ -74,38 +93,13 @@ func BuildPeer(meshName string, entry *v1alpha1.ClusterEntry, node *corev1.Node)
 	return peer, nil
 }
 
-// BuildAnchorPeer constructs a Peer that carries cluster-wide CIDRs not covered
-// by per-node Peers (e.g., serviceCIDR, additionalCIDRs).
-// It uses the first validated node's public key and endpoint as the anchor point.
-// Returns nil when there are no cluster-wide CIDRs to advertise, or when the
-// anchor node has no resolvable endpoint (an anchor without an endpoint cannot
-// terminate cross-cluster traffic for those CIDRs).
-func BuildAnchorPeer(meshName string, entry *v1alpha1.ClusterEntry, anchorNode *corev1.Node) *kilov1alpha1.Peer {
-	anchorCIDRs := collectAnchorCIDRs(entry)
-	if len(anchorCIDRs) == 0 {
-		return nil
-	}
-
-	endpoint, err := resolvePeerEndpoint(anchorNode, entry.WireguardPort)
-	if err != nil {
-		return nil
-	}
-
-	return &kilov1alpha1.Peer{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:   Name(meshName, entry.Name, "anchor"),
-			Labels: Labels(meshName, entry.Name),
-		},
-		Spec: kilov1alpha1.PeerSpec{
-			AllowedIPs: anchorCIDRs,
-			PublicKey:  anchorNode.Annotations[kilonode.AnnotationPublicKey],
-			Endpoint:   endpoint,
-		},
-	}
-}
-
-// collectAnchorCIDRs returns the cluster-wide CIDRs for an anchor peer.
-func collectAnchorCIDRs(entry *v1alpha1.ClusterEntry) []string {
+// CollectAnchorCIDRs returns the cluster-wide CIDRs (serviceCIDR plus any
+// AdditionalCIDRs) declared on a ClusterEntry. The caller is expected to
+// pass these as extraAllowedIPs to BuildPeer for a single (anchor) node —
+// see the commentary on BuildPeer for the WireGuard pubkey-dedup
+// rationale that motivates folding cluster-wide CIDRs into a node Peer
+// rather than emitting a separate anchor Peer.
+func CollectAnchorCIDRs(entry *v1alpha1.ClusterEntry) []string {
 	var cidrs []string
 
 	if entry.ServiceCIDR != "" {
