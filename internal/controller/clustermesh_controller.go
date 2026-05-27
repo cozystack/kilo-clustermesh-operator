@@ -102,7 +102,43 @@ func (r *ClusterMeshReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, err
 	}
 
+	// Sweep peers whose source-cluster was removed from spec.Clusters since
+	// the last reconcile. ReconcilePeers only sweeps within a single
+	// (mesh, source) pair, so a removed cluster's peers would otherwise
+	// persist forever in the surviving clusters.
+	r.cleanupStaleSourceClusters(ctx, log, mesh)
+
 	return ctrl.Result{}, r.updateStatus(ctx, mesh, clusterStatuses)
+}
+
+// cleanupStaleSourceClusters walks every cluster currently present in the
+// mesh's spec and asks each one to drop any Peer it holds whose
+// source-cluster label points at a cluster no longer in the spec. Failures
+// are logged and swallowed: a stale peer not deleted this tick will be
+// retried on the next reconcile, and we should not block the rest of the
+// status update on a single client error.
+func (r *ClusterMeshReconciler) cleanupStaleSourceClusters(ctx context.Context, log *slog.Logger, mesh *v1alpha1.ClusterMesh) {
+	validSources := make([]string, 0, len(mesh.Spec.Clusters))
+	for i := range mesh.Spec.Clusters {
+		validSources = append(validSources, mesh.Spec.Clusters[i].Name)
+	}
+
+	for i := range mesh.Spec.Clusters {
+		tgtEntry := &mesh.Spec.Clusters[i]
+
+		tgtClient, ok := r.Registry.Client(tgtEntry.Name)
+		if !ok {
+			continue
+		}
+
+		err := peer.DeleteStaleSourceClusters(ctx, tgtClient, mesh.Name, validSources)
+		if err != nil {
+			log.Warn("cleaning stale source-cluster peers",
+				slog.String("target", tgtEntry.Name),
+				slog.String("error", err.Error()),
+			)
+		}
+	}
 }
 
 // SetupWithManager registers the controller with the manager.
