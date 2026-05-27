@@ -106,7 +106,7 @@ func run() error {
 		return errors.Wrap(err, "installing CRD")
 	}
 
-	registry, err := buildInitialRegistry(ctx, cfg)
+	registry, err := buildInitialRegistry(ctx, cfg, slogger)
 	if err != nil {
 		return errors.Wrap(err, "building cluster registry")
 	}
@@ -213,7 +213,7 @@ func readNamespace() (string, error) {
 // namespace and constructs a registry that holds clients for every declared
 // cluster. If no ClusterMesh resources exist yet, an empty registry is
 // returned and the change-watcher will trigger a restart once one is created.
-func buildInitialRegistry(ctx context.Context, cfg *rest.Config) (*multicluster.ClusterRegistry, error) {
+func buildInitialRegistry(ctx context.Context, cfg *rest.Config, log *slog.Logger) (*multicluster.ClusterRegistry, error) {
 	preClient, err := client.New(cfg, client.Options{Scheme: scheme})
 	if err != nil {
 		return nil, errors.Wrap(err, "building pre-manager client")
@@ -226,7 +226,7 @@ func buildInitialRegistry(ctx context.Context, cfg *rest.Config) (*multicluster.
 
 	entries := mergeClusterEntries(meshes.Items)
 
-	registry, err := multicluster.Build(ctx, entries, cfg, preClient, scheme)
+	registry, err := multicluster.Build(ctx, entries, cfg, preClient, scheme, log)
 
 	return registry, errors.Wrap(err, "constructing registry")
 }

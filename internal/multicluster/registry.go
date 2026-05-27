@@ -18,6 +18,7 @@ package multicluster
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 
 	"github.com/cockroachdb/errors"
@@ -108,13 +109,31 @@ type EntrySource struct {
 // localCfg is the rest.Config of the cluster where the controller runs.
 // kubeClient is used to read kubeconfig Secrets for remote clusters from the
 // namespace of the ClusterMesh resource that contributed each entry.
+//
+// Per-entry failures (missing kubeconfig Secret, malformed kubeconfig,
+// failure to construct the cluster.Cluster) are logged via the provided
+// logger and the entry is skipped — they do not abort the build. This
+// matters during teardown: if a tenant's KubernetesSwitchcloud is being
+// deleted, its admin-kubeconfig Secret may be removed before the
+// ClusterMesh CR that references it. An intolerant Build would crash the
+// operator on startup, blocking the finalizer that would otherwise clean
+// up Peer objects in still-reachable clusters and release the
+// ClusterMesh. The reconciler already does best-effort sweeps over the
+// registry and skips clusters it cannot reach, so a partial registry is
+// safe and forward-progress-preserving. A nil logger is accepted and
+// treated as a discard logger.
 func Build(
 	ctx context.Context,
 	entries []EntrySource,
 	localCfg *rest.Config,
 	kubeClient client.Client,
 	scheme *runtime.Scheme,
+	log *slog.Logger,
 ) (*ClusterRegistry, error) {
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
+
 	reg := &ClusterRegistry{
 		clusters: make(map[string]cluster.Cluster, len(entries)),
 	}
@@ -125,7 +144,13 @@ func Build(
 
 		cfg, err := configForEntry(ctx, &entry, localCfg, src.MeshNamespace, kubeClient)
 		if err != nil {
-			return nil, err
+			log.Warn("skipping cluster entry during registry build",
+				slog.String("cluster", entry.Name),
+				slog.String("meshNamespace", src.MeshNamespace),
+				slog.String("error", err.Error()),
+			)
+
+			continue
 		}
 
 		if entry.Local {
@@ -136,7 +161,13 @@ func Build(
 			o.Scheme = scheme
 		})
 		if err != nil {
-			return nil, errors.Wrapf(err, "creating cluster object for %q", entry.Name)
+			log.Warn("skipping cluster entry during registry build",
+				slog.String("cluster", entry.Name),
+				slog.String("meshNamespace", src.MeshNamespace),
+				slog.String("error", errors.Wrapf(err, "creating cluster object for %q", entry.Name).Error()),
+			)
+
+			continue
 		}
 
 		reg.clusters[entry.Name] = c
