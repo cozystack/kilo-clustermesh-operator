@@ -22,6 +22,7 @@ import (
 	"sort"
 
 	"github.com/cockroachdb/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	kilov1alpha1 "github.com/squat/kilo-clustermesh-operator/pkg/kilo/v1alpha1"
@@ -51,6 +52,58 @@ func ReconcilePeers(
 
 	errs = append(errs, reconcileDesired(ctx, remoteClient, desiredByName, existingByName)...)
 	errs = append(errs, deleteOrphans(ctx, remoteClient, desiredByName, existingByName)...)
+
+	return errors.Join(errs...)
+}
+
+// DeleteStaleSourceClusters removes every Peer in targetClient labeled with
+// LabelMesh=meshName whose LabelSourceCluster does not appear in
+// validSourceClusters. It closes the gap left by ReconcilePeers: that function
+// only sweeps orphans within a single (mesh, source-cluster) pair, so once a
+// cluster entry is removed from a ClusterMesh's spec.Clusters, no per-pair
+// sweep ever runs for it and its Peer objects would otherwise persist forever,
+// confusing Kilo on the surviving clusters with unreachable endpoints and
+// conflicting AllowedIPs.
+//
+// Pass the names of all cluster entries currently present in the mesh's spec —
+// peers labeled with any other source-cluster will be deleted. Pass an empty
+// slice to delete every peer for the mesh in this target.
+//
+// IsNotFound errors during delete are ignored: a concurrent reconcile may have
+// already removed the same orphan, and the desired end state is the same.
+func DeleteStaleSourceClusters(
+	ctx context.Context,
+	targetClient client.Client,
+	meshName string,
+	validSourceClusters []string,
+) error {
+	existing := &kilov1alpha1.PeerList{}
+
+	err := targetClient.List(ctx, existing, client.MatchingLabels{LabelMesh: meshName})
+	if err != nil {
+		return errors.Wrapf(err, "listing peers for mesh %q", meshName)
+	}
+
+	valid := make(map[string]struct{}, len(validSourceClusters))
+	for _, name := range validSourceClusters {
+		valid[name] = struct{}{}
+	}
+
+	errs := make([]error, 0, len(existing.Items))
+
+	for i := range existing.Items {
+		item := &existing.Items[i]
+
+		src := item.Labels[LabelSourceCluster]
+		if _, ok := valid[src]; ok {
+			continue
+		}
+
+		err := targetClient.Delete(ctx, item)
+		if err != nil && !apierrors.IsNotFound(err) {
+			errs = append(errs, errors.Wrapf(err, "deleting stale peer %q (source=%q)", item.Name, src))
+		}
+	}
 
 	return errors.Join(errs...)
 }

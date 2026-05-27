@@ -163,6 +163,111 @@ func TestReconcilePeers_DeleteOrphans(t *testing.T) {
 	assert.Empty(t, listPeers(t, ctx, fc))
 }
 
+// peerForSource builds a Peer labeled mesh+source, used by the stale-source-
+// cluster cleanup tests to plant peers from multiple source-cluster values in
+// the same fake client.
+func peerForSource(name, meshName, sourceCluster string) *kilov1alpha1.Peer {
+	return &kilov1alpha1.Peer{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   name,
+			Labels: peer.Labels(meshName, sourceCluster),
+		},
+		Spec: kilov1alpha1.PeerSpec{
+			AllowedIPs: []string{"10.0.0.1/32"},
+			PublicKey:  "pubkey-" + name,
+		},
+	}
+}
+
+func listAllMeshPeers(t *testing.T, ctx context.Context, fc client.Client, meshName string) []kilov1alpha1.Peer {
+	t.Helper()
+
+	result := &kilov1alpha1.PeerList{}
+	err := fc.List(ctx, result, client.MatchingLabels{peer.LabelMesh: meshName})
+	require.NoError(t, err)
+
+	return result.Items
+}
+
+func TestDeleteStaleSourceClusters_RemovesPeersForRemovedClusters(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	meshName := "test-mesh"
+
+	keep := peerForSource("keep-one", meshName, "cluster-a")
+	stale := peerForSource("stale-one", meshName, "cluster-removed")
+
+	fc := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(keep, stale).Build()
+
+	err := peer.DeleteStaleSourceClusters(ctx, fc, meshName, []string{"cluster-a", "cluster-b"})
+
+	require.NoError(t, err)
+
+	items := listAllMeshPeers(t, ctx, fc, meshName)
+	require.Len(t, items, 1)
+	assert.Equal(t, "keep-one", items[0].Name)
+}
+
+func TestDeleteStaleSourceClusters_NoStaleEntriesIsNoOp(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	meshName := "test-mesh"
+
+	keep := peerForSource("keep-one", meshName, "cluster-a")
+	keepTwo := peerForSource("keep-two", meshName, "cluster-b")
+
+	fc := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(keep, keepTwo).Build()
+
+	err := peer.DeleteStaleSourceClusters(ctx, fc, meshName, []string{"cluster-a", "cluster-b"})
+
+	require.NoError(t, err)
+	assert.Len(t, listAllMeshPeers(t, ctx, fc, meshName), 2)
+}
+
+func TestDeleteStaleSourceClusters_EmptyValidSourcesDeletesAll(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	meshName := "test-mesh"
+
+	a := peerForSource("peer-a", meshName, "cluster-a")
+	b := peerForSource("peer-b", meshName, "cluster-b")
+
+	fc := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(a, b).Build()
+
+	err := peer.DeleteStaleSourceClusters(ctx, fc, meshName, nil)
+
+	require.NoError(t, err)
+	assert.Empty(t, listAllMeshPeers(t, ctx, fc, meshName))
+}
+
+func TestDeleteStaleSourceClusters_IgnoresOtherMeshes(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+
+	mine := peerForSource("mine", "mesh-one", "cluster-removed")
+	theirs := peerForSource("theirs", "mesh-two", "cluster-removed")
+
+	fc := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(mine, theirs).Build()
+
+	err := peer.DeleteStaleSourceClusters(ctx, fc, "mesh-one", []string{"cluster-a"})
+
+	require.NoError(t, err)
+
+	// mesh-one's stale peer is gone.
+	assert.Empty(t, listAllMeshPeers(t, ctx, fc, "mesh-one"))
+
+	// mesh-two's peer is untouched even though its source-cluster is also
+	// missing from mesh-one's valid list — different meshes have different
+	// spec.Clusters and must not affect each other.
+	otherMesh := listAllMeshPeers(t, ctx, fc, "mesh-two")
+	require.Len(t, otherMesh, 1)
+	assert.Equal(t, "theirs", otherMesh[0].Name)
+}
+
 func TestReconcilePeers_MixedCreateUpdateDelete(t *testing.T) {
 	t.Parallel()
 
