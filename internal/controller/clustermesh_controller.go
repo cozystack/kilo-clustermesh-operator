@@ -185,10 +185,8 @@ func (r *ClusterMeshReconciler) cleanupStaleSourceClusters(ctx context.Context, 
 		// Per-target deadline so one unreachable cluster cannot stall the
 		// whole reconcile pass — see cleanupSweepTimeout for the rationale.
 		sweepCtx, cancel := context.WithTimeout(ctx, cleanupSweepTimeout)
-
 		err := peer.DeleteStaleSourceClusters(sweepCtx, tgtClient, mesh.Name, sources)
 		cancel()
-
 		if err != nil {
 			log.Warn("cleaning stale source-cluster peers",
 				slog.String("target", name),
