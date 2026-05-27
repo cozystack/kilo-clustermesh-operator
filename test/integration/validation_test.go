@@ -32,12 +32,16 @@ import (
 )
 
 // TestOverlappingNetworks_NoPeersCreated verifies that when two ClusterMesh
-// objects declare overlapping pod CIDRs, the reconciler sets NetworksOverlap=True
-// on the conflicting mesh and does not create any Peers.
+// objects declare overlapping pod CIDRs for DIFFERENT clusters, the reconciler
+// sets NetworksOverlap=True on the conflicting mesh and does not create any
+// Peers. (Same-name clusters across meshes are the legitimate shared-hub case
+// and are covered by the unit tests in internal/validation/mesh_test.go.)
 func TestOverlappingNetworks_NoPeersCreated(t *testing.T) {
 	ctx := context.Background()
 
-	// mesh-a and mesh-b both claim 10.0.0.0/16 for their local cluster — overlap.
+	// mesh-a "local-a" and mesh-b "local-b" both claim 10.0.0.0/16 — overlap
+	// between two genuinely different clusters that happen to pick the same
+	// pod CIDR.
 	meshA := &v1alpha1.ClusterMesh{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "overlap-mesh-a",
@@ -46,13 +50,13 @@ func TestOverlappingNetworks_NoPeersCreated(t *testing.T) {
 		Spec: v1alpha1.ClusterMeshSpec{
 			Clusters: []v1alpha1.ClusterEntry{
 				{
-					Name:          "local",
+					Name:          "local-a",
 					Local:         true,
 					PodCIDRs:      []string{"10.0.0.0/16"},
 					WireguardCIDR: "10.100.0.0/24",
 				},
 				{
-					Name:          "remote",
+					Name:          "remote-a",
 					PodCIDRs:      []string{"10.3.0.0/16"},
 					WireguardCIDR: "10.100.1.0/24",
 				},
@@ -68,13 +72,13 @@ func TestOverlappingNetworks_NoPeersCreated(t *testing.T) {
 		Spec: v1alpha1.ClusterMeshSpec{
 			Clusters: []v1alpha1.ClusterEntry{
 				{
-					Name:          "local",
+					Name:          "local-b",
 					Local:         true,
-					PodCIDRs:      []string{"10.0.0.0/16"}, // same — overlaps with meshA
+					PodCIDRs:      []string{"10.0.0.0/16"}, // same — overlaps with meshA's different cluster
 					WireguardCIDR: "10.100.2.0/24",
 				},
 				{
-					Name:          "remote",
+					Name:          "remote-b",
 					PodCIDRs:      []string{"10.4.0.0/16"},
 					WireguardCIDR: "10.100.3.0/24",
 				},
