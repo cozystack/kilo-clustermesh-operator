@@ -22,6 +22,7 @@ import (
 
 	"github.com/cockroachdb/errors"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -108,6 +109,14 @@ func (r *ClusterMeshReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// persist forever in the surviving clusters.
 	r.cleanupStaleSourceClusters(ctx, log, mesh)
 
+	// Sweep peers whose owning ClusterMesh CR no longer exists. handleDeletion
+	// normally cleans these via the finalizer, but the finalizer may be
+	// skipped (force-delete, finalizer manually removed, operator crashloop
+	// that prevented the finalizer reconcile from running). Without this
+	// sweep, such peers persist forever as ghosts. Any live reconcile takes
+	// the global cleanup pass so the cluster always converges.
+	r.cleanupOrphanMeshPeers(ctx, log, mesh.Namespace)
+
 	return ctrl.Result{}, r.updateStatus(ctx, mesh, clusterStatuses)
 }
 
@@ -171,6 +180,94 @@ func (r *ClusterMeshReconciler) cleanupStaleSourceClusters(ctx context.Context, 
 			log.Warn("cleaning stale source-cluster peers",
 				slog.String("target", name),
 				slog.String("error", err.Error()),
+			)
+		}
+	}
+}
+
+// cleanupOrphanMeshPeers deletes Peer objects whose kilo-clustermesh.io/mesh
+// label names a ClusterMesh that no longer exists in the given namespace.
+// It is a global self-healing pass: it scopes by the operator-namespace of
+// living ClusterMesh CRs, so it cannot accidentally clobber peers managed
+// from another namespace.
+//
+// Why this exists: handleDeletion is the primary cleanup path, but it
+// requires the finalizer to actually run. The finalizer is skipped if:
+//   - the CR was force-deleted (e.g. operator was crashlooping and the user
+//     manually removed the finalizer to unblock teardown),
+//   - the finalizer was never present (legacy CR predating the finalizer),
+//   - reconcile-time errors caused the finalizer reconcile to never make it
+//     to the peer-deletion step.
+//
+// Without this sweep, the cluster accumulates ghost peers that no future
+// reconcile would ever notice — none of the per-CR cleanup paths look at
+// peers labeled for CRs other than their own.
+//
+// Failures are logged and swallowed: each peer is deleted independently and
+// a single client error must not abort the whole pass.
+func (r *ClusterMeshReconciler) cleanupOrphanMeshPeers(ctx context.Context, log *slog.Logger, namespace string) {
+	var meshes v1alpha1.ClusterMeshList
+
+	err := r.List(ctx, &meshes, client.InNamespace(namespace))
+	if err != nil {
+		log.Warn("listing meshes for orphan sweep",
+			slog.String("namespace", namespace),
+			slog.String("error", err.Error()),
+		)
+
+		return
+	}
+
+	living := make(map[string]struct{}, len(meshes.Items))
+	for i := range meshes.Items {
+		living[meshes.Items[i].Name] = struct{}{}
+	}
+
+	for _, clusterName := range r.Registry.Clusters() {
+		tgtClient, ok := r.Registry.Client(clusterName)
+		if !ok {
+			continue
+		}
+
+		var peers kilov1alpha1.PeerList
+
+		err := tgtClient.List(ctx, &peers)
+		if err != nil {
+			log.Warn("listing peers for orphan sweep",
+				slog.String("target", clusterName),
+				slog.String("error", err.Error()),
+			)
+
+			continue
+		}
+
+		for i := range peers.Items {
+			peerObj := &peers.Items[i]
+
+			meshLabel := peerObj.Labels[peer.LabelMesh]
+			if meshLabel == "" {
+				continue
+			}
+
+			if _, alive := living[meshLabel]; alive {
+				continue
+			}
+
+			deleteErr := tgtClient.Delete(ctx, peerObj)
+			if deleteErr != nil && !apierrors.IsNotFound(deleteErr) {
+				log.Warn("deleting orphan peer",
+					slog.String("target", clusterName),
+					slog.String("peer", peerObj.Name),
+					slog.String("error", deleteErr.Error()),
+				)
+
+				continue
+			}
+
+			log.Info("deleted orphan peer whose ClusterMesh CR no longer exists",
+				slog.String("target", clusterName),
+				slog.String("peer", peerObj.Name),
+				slog.String("orphan-mesh", meshLabel),
 			)
 		}
 	}

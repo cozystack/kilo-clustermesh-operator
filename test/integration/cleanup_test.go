@@ -189,6 +189,87 @@ func TestCleanupStaleSourceClusters_IgnoresPeersFromOtherMeshes(t *testing.T) {
 	assertPeerExists(t, globalEnv.remoteClient, "foreign--ghost--node", true)
 }
 
+// TestCleanupOrphanMeshPeers_DeletesGhostsAfterCRGone verifies the
+// defense-in-depth sweep: peers labeled for a ClusterMesh CR that no longer
+// exists (because the finalizer was bypassed: force-delete, manual
+// finalizer removal, operator crashloop) must be deleted by any live
+// reconcile of any surviving mesh.
+//
+// Setup: plant a Peer labeled with a "ghost-mesh" name that has no
+// corresponding ClusterMesh object. Then reconcile a live mesh — the sweep
+// must walk the registry and delete that orphan.
+func TestCleanupOrphanMeshPeers_DeletesGhostsAfterCRGone(t *testing.T) {
+	ctx := context.Background()
+
+	// Live mesh that drives the reconcile.
+	live := simpleMeshSpec("orphan-sweep-live-mesh", "default")
+	createMesh(t, live)
+	t.Cleanup(func() { deleteMesh(t, live) })
+
+	// Orphan peer: labeled with a mesh name that does NOT correspond to
+	// any ClusterMesh CR in the namespace. Mirrors the production
+	// failure mode where a tenant CR was force-deleted, leaving its
+	// peers as ghosts no per-CR reconcile would ever revisit.
+	orphan := &kilov1alpha1.Peer{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "ghost--ghost-cluster--node-zero",
+			Labels: peer.Labels("ghost-mesh-deleted", "ghost-cluster"),
+		},
+		Spec: kilov1alpha1.PeerSpec{
+			AllowedIPs: []string{"10.66.0.0/16"},
+			PublicKey:  "pubkey-orphan",
+		},
+	}
+	require.NoError(t, globalEnv.remoteClient.Create(ctx, orphan))
+
+	// Sanity: orphan exists before reconcile.
+	assertPeerExists(t, globalEnv.remoteClient, "ghost--ghost-cluster--node-zero", true)
+
+	// First reconcile adds the finalizer; second runs the cleanup passes.
+	mustReconcile(t, live)
+	mustReconcile(t, live)
+
+	assertPeerExists(t, globalEnv.remoteClient, "ghost--ghost-cluster--node-zero", false)
+}
+
+// TestCleanupOrphanMeshPeers_LeavesPeersOfLivingMeshAlone guards against
+// a regression where the orphan sweep deletes peers whose mesh CR DOES
+// exist. The peer in this test belongs to the live mesh itself — it must
+// survive every reconcile (subject only to the per-CR sweeps that apply
+// when the source-cluster is invalid).
+func TestCleanupOrphanMeshPeers_LeavesPeersOfLivingMeshAlone(t *testing.T) {
+	ctx := context.Background()
+
+	live := simpleMeshSpec("orphan-sweep-keep-mesh", "default")
+	createMesh(t, live)
+	t.Cleanup(func() { deleteMesh(t, live) })
+
+	// Peer belongs to the live mesh; its source-cluster IS in the mesh's
+	// spec, so neither per-CR nor orphan sweep should touch it.
+	live.Spec.Clusters[0].Name = "local"
+	survivor := &kilov1alpha1.Peer{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "survivor--local--node-a",
+			Labels: peer.Labels(live.Name, "local"),
+		},
+		Spec: kilov1alpha1.PeerSpec{
+			AllowedIPs: []string{"10.1.0.0/24"},
+			PublicKey:  "pubkey-survivor",
+		},
+	}
+	// Plant in a cluster that's NOT in spec (remote is not iterated by
+	// the per-pair ReconcilePeers source=local because local has no
+	// nodes; only the orphan sweep would touch this peer). Same idea
+	// — the survivor must remain because its mesh label points at a
+	// living CR.
+	require.NoError(t, globalEnv.localClient.Create(ctx, survivor))
+
+	mustReconcile(t, live)
+	mustReconcile(t, live)
+
+	assertPeerExists(t, globalEnv.localClient, "survivor--local--node-a", true)
+}
+
 func assertPeerExists(t *testing.T, cl client.Client, name string, want bool) {
 	t.Helper()
 
