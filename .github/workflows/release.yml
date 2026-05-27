@@ -88,3 +88,32 @@ jobs:
           for tgz in _dist/*.tgz; do
             helm push "$tgz" oci://ghcr.io/cozystack/charts
           done
+
+      # Build a Cozystack-package bundle OCI artifact from the packages/
+      # directory. This shape lets cozystack-engine auto-create the
+      # ArtifactGenerator from the PackageSource (init.yaml) and unblocks
+      # the install via Package -> HelmRelease.
+      - name: Install flux CLI
+        uses: fluxcd/flux2/action@main
+      - name: Compute bundle tag
+        id: bundletag
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            ver="${GITHUB_REF#refs/tags/v}"
+          else
+            ver=$(awk '/^appVersion:/ {gsub(/"/, "", $2); print $2}' charts/kilo-clustermesh-operator/Chart.yaml)
+            ver="${ver}-sha-${GITHUB_SHA::8}"
+          fi
+          echo "value=$ver" >> "$GITHUB_OUTPUT"
+      - name: Push Cozystack package bundle
+        run: |
+          # The wrapper chart at packages/system/kilo-clustermesh-operator
+          # depends on the operator chart at charts/. The dependency tarball
+          # must live inside the wrapper before the bundle is pushed so the
+          # extracted artifact is self-contained.
+          helm dependency update packages/system/kilo-clustermesh-operator
+          flux push artifact \
+            "oci://ghcr.io/${{ github.repository_owner }}/kilo-clustermesh-operator-packages:${{ steps.bundletag.outputs.value }}" \
+            --path=packages \
+            --source="${{ github.server_url }}/${{ github.repository }}" \
+            --revision="${{ steps.bundletag.outputs.value }}@sha1:${{ github.sha }}"
