@@ -63,7 +63,28 @@ image:
 
 ### 2. Prepare remote-cluster credentials
 
-On every remote cluster, create a `ServiceAccount`, `ClusterRole`, `ClusterRoleBinding`, and a long-lived token `Secret`:
+The operator runs in a single cluster and reaches every other cluster in
+a mesh through a kubeconfig stored as a `Secret` next to the
+`ClusterMesh` resource. Below is the minimal RBAC the operator needs on
+each remote cluster; nothing else is required and granting `cluster-admin`
+is **not** recommended for production.
+
+The operator uses these permissions:
+
+- `nodes` get/list/watch — discover member nodes and read their Kilo
+  annotations
+- `nodes` patch — set `kilo.squat.ai/force-endpoint=<InternalIP>:<port>` on
+  member nodes whose endpoint cannot otherwise be derived (e.g. OpenStack
+  tenants without floating IPs)
+- `kilo.squat.ai/peers` full CRUD — publish and reconcile `Peer` objects
+  representing nodes from other clusters in the mesh
+- `apiextensions.k8s.io/customresourcedefinitions` get/create/update —
+  install the upstream Kilo `Peer` CRD on the remote cluster if it is
+  missing (so a brand-new cluster can join a mesh without manual CRD
+  bootstrap). The operator never deletes CRDs.
+
+On every remote cluster, create a `ServiceAccount`, `ClusterRole`,
+`ClusterRoleBinding`, and a long-lived token `Secret`:
 
 ```yaml
 ---
@@ -80,10 +101,13 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: [nodes]
-    verbs: [get, list, watch]
+    verbs: [get, list, watch, patch]
   - apiGroups: [kilo.squat.ai]
     resources: [peers]
     verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [apiextensions.k8s.io]
+    resources: [customresourcedefinitions]
+    verbs: [get, create, update]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -107,6 +131,13 @@ metadata:
     kubernetes.io/service-account.name: clustermesh-reader
 type: kubernetes.io/service-account-token
 ```
+
+> The annotated `Secret` of type `kubernetes.io/service-account-token`
+> gives a non-expiring token. If you prefer short-lived credentials,
+> swap in `kubectl create token --duration=8760h clustermesh-reader`
+> and rotate before expiry; the operator only re-reads the Secret on
+> reconcile, so a rotated token takes effect at the next mesh change
+> or after a `flux reconcile`.
 
 Build a kubeconfig from the token and store it as a Secret on the cluster where the operator runs:
 
