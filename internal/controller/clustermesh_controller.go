@@ -111,6 +111,19 @@ func (r *ClusterMeshReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	return ctrl.Result{}, r.updateStatus(ctx, mesh, clusterStatuses)
 }
 
+// SetupWithManager registers the controller with the manager.
+func (r *ClusterMeshReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	err := ctrl.NewControllerManagedBy(mgr).
+		For(&v1alpha1.ClusterMesh{}).
+		Named("clustermesh").
+		WithEventFilter(predicate.Funcs{
+			DeleteFunc: func(event.DeleteEvent) bool { return false },
+		}).
+		Complete(r)
+
+	return errors.Wrap(err, "building clustermesh controller")
+}
+
 // cleanupStaleSourceClusters walks every cluster currently present in the
 // mesh's spec and asks each one to drop any Peer it holds whose
 // source-cluster label points at a cluster no longer in the spec. Failures
@@ -139,19 +152,6 @@ func (r *ClusterMeshReconciler) cleanupStaleSourceClusters(ctx context.Context, 
 			)
 		}
 	}
-}
-
-// SetupWithManager registers the controller with the manager.
-func (r *ClusterMeshReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	err := ctrl.NewControllerManagedBy(mgr).
-		For(&v1alpha1.ClusterMesh{}).
-		Named("clustermesh").
-		WithEventFilter(predicate.Funcs{
-			DeleteFunc: func(event.DeleteEvent) bool { return false },
-		}).
-		Complete(r)
-
-	return errors.Wrap(err, "building clustermesh controller")
 }
 
 // handleDeletion removes all Peers for this mesh from every cluster, then drops the finalizer.
