@@ -80,7 +80,7 @@ func TestBuildPeer_HappyPath(t *testing.T) {
 
 	node := testNode("worker-1", testPodCIDR, annotations)
 
-	got, err := peer.BuildPeer("my-mesh", testEntry(), node)
+	got, err := peer.BuildPeer("my-mesh", testEntry(), node, nil)
 
 	require.NoError(t, err)
 	require.NotNil(t, got)
@@ -108,7 +108,7 @@ func TestBuildPeer_CozystackStyleWGAnnotation(t *testing.T) {
 
 	node := testNode("worker-1", testPodCIDR, annotations)
 
-	got, err := peer.BuildPeer("my-mesh", testEntry(), node)
+	got, err := peer.BuildPeer("my-mesh", testEntry(), node, nil)
 
 	require.NoError(t, err)
 	require.NotNil(t, got)
@@ -126,7 +126,7 @@ func TestBuildPeer_InvalidWireguardIP(t *testing.T) {
 
 	node := testNode("worker-1", testPodCIDR, annotations)
 
-	got, err := peer.BuildPeer("my-mesh", testEntry(), node)
+	got, err := peer.BuildPeer("my-mesh", testEntry(), node, nil)
 
 	require.Error(t, err)
 	assert.Nil(t, got)
@@ -141,7 +141,7 @@ func TestBuildPeer_MissingPublicKey(t *testing.T) {
 
 	node := testNode("worker-1", testPodCIDR, annotations)
 
-	got, err := peer.BuildPeer("my-mesh", testEntry(), node)
+	got, err := peer.BuildPeer("my-mesh", testEntry(), node, nil)
 
 	require.Error(t, err)
 	assert.Nil(t, got)
@@ -157,7 +157,7 @@ func TestBuildPeer_MissingWireguardIP(t *testing.T) {
 
 	node := testNode("worker-1", testPodCIDR, annotations)
 
-	got, err := peer.BuildPeer("my-mesh", testEntry(), node)
+	got, err := peer.BuildPeer("my-mesh", testEntry(), node, nil)
 
 	require.Error(t, err)
 	assert.Nil(t, got)
@@ -178,7 +178,7 @@ func TestBuildPeer_NoEndpointSources_ReturnsError(t *testing.T) {
 
 	node := testNode("worker-1", testPodCIDR, annotations)
 
-	got, err := peer.BuildPeer("my-mesh", testEntry(), node)
+	got, err := peer.BuildPeer("my-mesh", testEntry(), node, nil)
 
 	require.Error(t, err)
 	assert.Nil(t, got)
@@ -193,7 +193,7 @@ func TestBuildPeer_DNSEndpoint(t *testing.T) {
 
 	node := testNode("worker-1", testPodCIDR, annotations)
 
-	got, err := peer.BuildPeer("my-mesh", testEntry(), node)
+	got, err := peer.BuildPeer("my-mesh", testEntry(), node, nil)
 
 	require.NoError(t, err)
 	require.NotNil(t, got)
@@ -211,7 +211,7 @@ func TestBuildPeer_IPEndpoint(t *testing.T) {
 
 	node := testNode("worker-1", testPodCIDR, annotations)
 
-	got, err := peer.BuildPeer("my-mesh", testEntry(), node)
+	got, err := peer.BuildPeer("my-mesh", testEntry(), node, nil)
 
 	require.NoError(t, err)
 	require.NotNil(t, got)
@@ -221,9 +221,13 @@ func TestBuildPeer_IPEndpoint(t *testing.T) {
 	assert.Empty(t, got.Spec.Endpoint.DNS)
 }
 
-func TestBuildAnchorPeer_WithServiceCIDR(t *testing.T) {
+func TestBuildPeer_AnchorExtras_WithServiceCIDR(t *testing.T) {
 	t.Parallel()
 
+	// Replaces the legacy TestBuildAnchorPeer_WithServiceCIDR. The anchor
+	// CIDRs now fold into the first node's Peer via extraAllowedIPs, so a
+	// single WireGuard peer entry on the receiving side carries both the
+	// node-local routes and the cluster-wide routes.
 	entry := &v1alpha1.ClusterEntry{
 		Name:        "cluster-a",
 		ServiceCIDR: "10.96.0.0/12",
@@ -231,18 +235,22 @@ func TestBuildAnchorPeer_WithServiceCIDR(t *testing.T) {
 
 	node := testNode("worker-1", testPodCIDR, baseAnnotations())
 
-	got := peer.BuildAnchorPeer("my-mesh", entry, node)
+	got, err := peer.BuildPeer("my-mesh", entry, node, peer.CollectAnchorCIDRs(entry))
 
+	require.NoError(t, err)
 	require.NotNil(t, got)
-	assert.Equal(t, peer.Name("my-mesh", "cluster-a", "anchor"), got.Name)
+	assert.Equal(t, peer.Name("my-mesh", "cluster-a", "worker-1"), got.Name)
 	assert.Equal(t, peer.Labels("my-mesh", "cluster-a"), got.Labels)
+	assert.Contains(t, got.Spec.AllowedIPs, testPodCIDR)
 	assert.Contains(t, got.Spec.AllowedIPs, "10.96.0.0/12")
 	assert.Equal(t, testPubKey, got.Spec.PublicKey)
 }
 
-func TestBuildAnchorPeer_WithAdditionalCIDRs(t *testing.T) {
+func TestBuildPeer_AnchorExtras_WithAdditionalCIDRs(t *testing.T) {
 	t.Parallel()
 
+	// AdditionalCIDRs append after serviceCIDR in CollectAnchorCIDRs and
+	// must appear after the node's own routes in the merged AllowedIPs.
 	entry := &v1alpha1.ClusterEntry{
 		Name:            "cluster-a",
 		ServiceCIDR:     "10.96.0.0/12",
@@ -251,15 +259,24 @@ func TestBuildAnchorPeer_WithAdditionalCIDRs(t *testing.T) {
 
 	node := testNode("worker-1", testPodCIDR, baseAnnotations())
 
-	got := peer.BuildAnchorPeer("my-mesh", entry, node)
+	got, err := peer.BuildPeer("my-mesh", entry, node, peer.CollectAnchorCIDRs(entry))
 
+	require.NoError(t, err)
 	require.NotNil(t, got)
-	assert.Equal(t, []string{"10.96.0.0/12", "192.168.100.0/24", "172.16.0.0/16"}, got.Spec.AllowedIPs)
+
+	// Node-local routes come first, then anchor CIDRs in declared order.
+	assert.Equal(t, testPodCIDR, got.Spec.AllowedIPs[0])
+	assert.Contains(t, got.Spec.AllowedIPs, "10.96.0.0/12")
+	assert.Contains(t, got.Spec.AllowedIPs, "192.168.100.0/24")
+	assert.Contains(t, got.Spec.AllowedIPs, "172.16.0.0/16")
 }
 
-func TestBuildAnchorPeer_NoAnchorCIDRs(t *testing.T) {
+func TestBuildPeer_NoExtras_ProducesNodeOnlyAllowedIPs(t *testing.T) {
 	t.Parallel()
 
+	// Replaces TestBuildAnchorPeer_NoAnchorCIDRs: when the caller passes
+	// no extras (non-anchor node, or anchor cluster has no serviceCIDR /
+	// additionalCIDRs), the AllowedIPs list is just the node's own routes.
 	entry := &v1alpha1.ClusterEntry{
 		Name:            "cluster-a",
 		ServiceCIDR:     "",
@@ -268,9 +285,11 @@ func TestBuildAnchorPeer_NoAnchorCIDRs(t *testing.T) {
 
 	node := testNode("worker-1", testPodCIDR, baseAnnotations())
 
-	got := peer.BuildAnchorPeer("my-mesh", entry, node)
+	got, err := peer.BuildPeer("my-mesh", entry, node, peer.CollectAnchorCIDRs(entry))
 
-	assert.Nil(t, got, "must return nil when there are no cluster-wide CIDRs")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Len(t, got.Spec.AllowedIPs, 2, "node-only Peer must carry exactly pod-CIDR + wg-ip /32")
 }
 
 func TestBuildPeer_MalformedForceEndpoint_ReturnsError(t *testing.T) {
@@ -285,7 +304,7 @@ func TestBuildPeer_MalformedForceEndpoint_ReturnsError(t *testing.T) {
 
 	node := testNode("worker-1", testPodCIDR, annotations)
 
-	got, err := peer.BuildPeer("my-mesh", testEntry(), node)
+	got, err := peer.BuildPeer("my-mesh", testEntry(), node, nil)
 
 	require.Error(t, err)
 	assert.Nil(t, got)
@@ -302,7 +321,7 @@ func TestBuildPeer_ClustermeshEndpointPreferred(t *testing.T) {
 
 	node := testNode("worker-1", testPodCIDR, annotations)
 
-	got, err := peer.BuildPeer("my-mesh", testEntry(), node)
+	got, err := peer.BuildPeer("my-mesh", testEntry(), node, nil)
 
 	require.NoError(t, err)
 	require.NotNil(t, got)
@@ -328,7 +347,7 @@ func TestBuildPeer_ExternalIPFallback(t *testing.T) {
 
 	entry := &v1alpha1.ClusterEntry{Name: "cluster-a", WireguardPort: 51820}
 
-	got, err := peer.BuildPeer("my-mesh", entry, node)
+	got, err := peer.BuildPeer("my-mesh", entry, node, nil)
 
 	require.NoError(t, err)
 	require.NotNil(t, got)
@@ -349,18 +368,21 @@ func TestBuildPeer_MalformedClustermeshEndpoint_ReturnsError(t *testing.T) {
 
 	node := testNode("worker-1", testPodCIDR, annotations)
 
-	got, err := peer.BuildPeer("my-mesh", testEntry(), node)
+	got, err := peer.BuildPeer("my-mesh", testEntry(), node, nil)
 
 	require.Error(t, err)
 	assert.Nil(t, got)
 }
 
-func TestBuildAnchorPeer_NoEndpointSource_ReturnsNil(t *testing.T) {
+func TestBuildPeer_AnchorExtras_NoEndpointSource_ReturnsError(t *testing.T) {
 	t.Parallel()
 
-	// An anchor peer without an endpoint cannot terminate cross-cluster
-	// traffic for its CIDRs, so BuildAnchorPeer returns nil when the
-	// anchor node has no resolvable endpoint.
+	// Replaces TestBuildAnchorPeer_NoEndpointSource_ReturnsNil. Endpoint
+	// resolution is shared by every node Peer (anchor or not), so the
+	// same "no resolvable endpoint" condition now surfaces as a hard
+	// error from BuildPeer rather than a nil-anchor signal. That is
+	// strictly stricter: the operator surfaces misconfiguration instead
+	// of silently dropping cluster-wide CIDRs.
 	entry := &v1alpha1.ClusterEntry{
 		Name:        "cluster-a",
 		ServiceCIDR: "10.96.0.0/12",
@@ -370,18 +392,21 @@ func TestBuildAnchorPeer_NoEndpointSource_ReturnsNil(t *testing.T) {
 	delete(annotations, kilonode.AnnotationForceEndpoint)
 
 	node := testNode("worker-1", testPodCIDR, annotations)
+	node.Status.Addresses = nil
 
-	got := peer.BuildAnchorPeer("my-mesh", entry, node)
+	got, err := peer.BuildPeer("my-mesh", entry, node, peer.CollectAnchorCIDRs(entry))
 
-	assert.Nil(t, got, "anchor without resolvable endpoint must be nil")
+	require.Error(t, err)
+	assert.Nil(t, got, "node Peer without resolvable endpoint must error, regardless of anchor CIDRs")
 }
 
-func TestBuildAnchorPeer_ExternalIPFallback(t *testing.T) {
+func TestBuildPeer_AnchorExtras_ExternalIPFallback(t *testing.T) {
 	t.Parallel()
 
-	// The anchor peer participates in the same fallback chain — when the
-	// anchor node has no annotations but does have an ExternalIP, the
-	// endpoint is synthesised from Node.Status.Addresses.
+	// Replaces TestBuildAnchorPeer_ExternalIPFallback. The endpoint
+	// fallback chain (clustermesh-endpoint → force-endpoint → ExternalIP)
+	// is the same for anchor vs non-anchor nodes — there is no separate
+	// path anymore.
 	entry := &v1alpha1.ClusterEntry{
 		Name:          "cluster-a",
 		ServiceCIDR:   "10.96.0.0/12",
@@ -396,12 +421,14 @@ func TestBuildAnchorPeer_ExternalIPFallback(t *testing.T) {
 		{Type: corev1.NodeExternalIP, Address: "203.0.113.99"},
 	}
 
-	got := peer.BuildAnchorPeer("my-mesh", entry, node)
+	got, err := peer.BuildPeer("my-mesh", entry, node, peer.CollectAnchorCIDRs(entry))
 
+	require.NoError(t, err)
 	require.NotNil(t, got)
 	require.NotNil(t, got.Spec.Endpoint)
 	assert.Equal(t, "203.0.113.99", got.Spec.Endpoint.IP)
 	assert.Equal(t, uint32(51820), got.Spec.Endpoint.Port)
+	assert.Contains(t, got.Spec.AllowedIPs, "10.96.0.0/12")
 }
 
 func TestBuildPeer_BracketedDNSEndpoint(t *testing.T) {
@@ -415,7 +442,7 @@ func TestBuildPeer_BracketedDNSEndpoint(t *testing.T) {
 
 	node := testNode("worker-1", testPodCIDR, annotations)
 
-	got, err := peer.BuildPeer("my-mesh", testEntry(), node)
+	got, err := peer.BuildPeer("my-mesh", testEntry(), node, nil)
 
 	require.NoError(t, err)
 	require.NotNil(t, got)
