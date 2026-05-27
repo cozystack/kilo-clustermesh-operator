@@ -102,20 +102,22 @@ func TestCleanupStaleSourceClusters_RemovesPeersOfRemovedCluster(t *testing.T) {
 
 // TestCleanupStaleSourceClusters_SweepsClustersOutsideSpec verifies the
 // cross-CR cleanup property: a peer left in a cluster that is in the
-// operator's registry (because another ClusterMesh names it) but is NOT in
-// THIS mesh's spec.Clusters must still be swept. This is the case that
-// breaks when cleanup only walks spec.Clusters: the "removed target" half
-// of the stale-peer problem.
+// operator's registry (because another ClusterMesh names it) but is NOT
+// in THIS mesh's spec.Clusters must still be swept. This is the case
+// that breaks when cleanup only walks spec.Clusters: the "removed
+// target" half of the stale-peer problem.
 //
-// Setup: this mesh's spec contains only "local". The registry, however,
-// also has "remote" (in real life from a sibling ClusterMesh). A peer
-// labeled for this mesh sits in remote with a source-cluster that is not
-// in this mesh's spec. The reconcile must reach into remote and delete it.
+// Setup: this mesh's spec contains "local" plus a placeholder
+// "ghost-elsewhere" that is not in the registry (the CRD requires at
+// least two cluster entries; ghost-elsewhere satisfies that without
+// covering the "remote" cluster the registry knows about). The peer
+// under test is planted in remote — which is reachable through the
+// registry (sibling-mesh kubeconfig in real deployments) but is NOT
+// referenced by this mesh's spec. The cross-CR sweep must visit remote
+// and delete the peer.
 func TestCleanupStaleSourceClusters_SweepsClustersOutsideSpec(t *testing.T) {
 	ctx := context.Background()
 
-	// Spec contains ONLY local; remote is reachable via the registry but
-	// not referenced by this mesh.
 	mesh := &v1alpha1.ClusterMesh{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "cleanup-cross-cr-mesh",
@@ -128,6 +130,15 @@ func TestCleanupStaleSourceClusters_SweepsClustersOutsideSpec(t *testing.T) {
 					Local:         true,
 					PodCIDRs:      []string{"10.1.0.0/16"},
 					WireguardCIDR: "10.100.0.0/24",
+				},
+				{
+					// Placeholder to satisfy the CRD's minItems=2 on
+					// spec.clusters. Not in the registry — the
+					// registry exposes "local" and "remote", so this
+					// entry is effectively ignored by reconcile.
+					Name:          "ghost-elsewhere",
+					PodCIDRs:      []string{"10.2.0.0/16"},
+					WireguardCIDR: "10.100.1.0/24",
 				},
 			},
 		},
