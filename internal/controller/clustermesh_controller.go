@@ -45,6 +45,19 @@ import (
 
 const finalizerName = "kilo-clustermesh.io/cleanup"
 
+// bootstrapRequeueAfter caps the wait between reconcile attempts while at
+// least one source cluster is still bootstrapping (kubeconfig secret not
+// yet created, or apiserver up but no nodes joined yet). The reconciler
+// watches only ClusterMesh CRs, not the Nodes of remote clusters, so a
+// reconcile that runs while the source is empty completes silently with
+// no error and no useful work — controller-runtime then has nothing to
+// requeue on, and the next attempt has to wait for an external trigger
+// (Cozystack Package controller re-applying the CR, etc.). That gap
+// produced a 17-minute mesh-up delay in the wild for a tenant whose VM
+// landed a few minutes after the operator's first reconcile. A short
+// periodic requeue is a cheap belt-and-braces against this race.
+const bootstrapRequeueAfter = 30 * time.Second
+
 // +kubebuilder:rbac:groups=kilo.squat.ai,resources=clustermeshes,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=kilo.squat.ai,resources=clustermeshes/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=kilo.squat.ai,resources=clustermeshes/finalizers,verbs=update
@@ -68,7 +81,7 @@ type ClusterMeshReconciler struct {
 func (r *ClusterMeshReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := r.Log.With(slog.String("name", req.Name), slog.String("namespace", req.Namespace))
 
-	err := r.reconcile(ctx, log, req)
+	incomplete, err := r.reconcile(ctx, log, req)
 
 	// A NoKindMatchError on a remote cluster's REST mapper survives the
 	// lifetime of cluster.Cluster because the negative discovery entry
@@ -81,6 +94,15 @@ func (r *ClusterMeshReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// lease and inflate to a CrashLoopBackOff after a few stale CRDs.
 	for _, m := range r.Registry.Mappers() {
 		restart.RefreshMapperOnNoMatch(err, m, log)
+	}
+
+	// Schedule a periodic retry while any source cluster is still
+	// bootstrapping. On error we leave RequeueAfter zero so
+	// controller-runtime applies its own exponential backoff via the
+	// rate limiter; mixing RequeueAfter with an error would defeat the
+	// backoff.
+	if err == nil && incomplete {
+		return ctrl.Result{RequeueAfter: bootstrapRequeueAfter}, nil
 	}
 
 	return ctrl.Result{}, err
@@ -99,17 +121,22 @@ func (r *ClusterMeshReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return errors.Wrap(err, "building clustermesh controller")
 }
 
-func (r *ClusterMeshReconciler) reconcile(ctx context.Context, log *slog.Logger, req ctrl.Request) error {
+// reconcile is the body of Reconcile. The bool return is true when the
+// reconcile completed without error but at least one source cluster was
+// still bootstrapping (missing from the registry, or no nodes yet); the
+// caller translates that into a RequeueAfter so the controller does not
+// stall waiting for an external event on the ClusterMesh CR.
+func (r *ClusterMeshReconciler) reconcile(ctx context.Context, log *slog.Logger, req ctrl.Request) (bool, error) {
 	mesh := &v1alpha1.ClusterMesh{}
 
 	err := r.Get(ctx, req.NamespacedName, mesh)
 	if err != nil {
-		return errors.Wrap(client.IgnoreNotFound(err), "fetching ClusterMesh")
+		return false, errors.Wrap(client.IgnoreNotFound(err), "fetching ClusterMesh")
 	}
 
 	// Handle deletion via finalizer.
 	if !mesh.DeletionTimestamp.IsZero() {
-		return r.handleDeletion(ctx, log, mesh)
+		return false, r.handleDeletion(ctx, log, mesh)
 	}
 
 	// Ensure finalizer is present.
@@ -118,23 +145,23 @@ func (r *ClusterMeshReconciler) reconcile(ctx context.Context, log *slog.Logger,
 
 		err = r.Update(ctx, mesh)
 		if err != nil {
-			return errors.Wrap(err, "adding finalizer")
+			return false, errors.Wrap(err, "adding finalizer")
 		}
 
-		return nil
+		return false, nil
 	}
 
 	// Mesh-level validation.
 	if overlap, msg := r.validateMeshNetworks(ctx, log, mesh); overlap {
-		return r.setOverlapCondition(ctx, mesh, msg)
+		return false, r.setOverlapCondition(ctx, mesh, msg)
 	}
 
 	setCondition(mesh, "NetworksOverlap", metav1.ConditionFalse, "NoOverlap", "all CIDRs are disjoint")
 
 	// Reconcile per-cluster peers.
-	clusterStatuses, err := r.reconcileAllClusters(ctx, log, mesh)
+	clusterStatuses, incomplete, err := r.reconcileAllClusters(ctx, log, mesh)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	// Sweep peers whose source-cluster was removed from spec.Clusters since
@@ -151,7 +178,7 @@ func (r *ClusterMeshReconciler) reconcile(ctx context.Context, log *slog.Logger,
 	// the global cleanup pass so the cluster always converges.
 	r.cleanupOrphanMeshPeers(ctx, log, mesh.Namespace)
 
-	return r.updateStatus(ctx, mesh, clusterStatuses)
+	return incomplete, r.updateStatus(ctx, mesh, clusterStatuses)
 }
 
 // cleanupSweepTimeout caps the per-target list/delete pass time so a single
@@ -412,9 +439,14 @@ func (r *ClusterMeshReconciler) setOverlapCondition(ctx context.Context, mesh *v
 	return errors.Wrap(r.Status().Update(ctx, mesh), "updating status on CIDR overlap")
 }
 
-// reconcileAllClusters runs the per-cluster-pair reconciliation loop.
-func (r *ClusterMeshReconciler) reconcileAllClusters(ctx context.Context, log *slog.Logger, mesh *v1alpha1.ClusterMesh) ([]v1alpha1.ClusterStatus, error) {
+// reconcileAllClusters runs the per-cluster-pair reconciliation loop. The
+// bool return is true when at least one source cluster is still
+// bootstrapping (missing from the registry, or zero nodes joined yet),
+// so the caller can schedule a periodic requeue.
+func (r *ClusterMeshReconciler) reconcileAllClusters(ctx context.Context, log *slog.Logger, mesh *v1alpha1.ClusterMesh) ([]v1alpha1.ClusterStatus, bool, error) {
 	statuses := make([]v1alpha1.ClusterStatus, 0, len(mesh.Spec.Clusters))
+
+	incomplete := false
 
 	for i := range mesh.Spec.Clusters {
 		srcEntry := &mesh.Spec.Clusters[i]
@@ -423,12 +455,31 @@ func (r *ClusterMeshReconciler) reconcileAllClusters(ctx context.Context, log *s
 		if !ok {
 			log.Warn("source cluster not found in registry", slog.String("cluster", srcEntry.Name))
 
+			incomplete = true
+
 			continue
 		}
 
 		nodes, err := listNodes(ctx, srcClient)
 		if err != nil {
-			return nil, errors.Wrapf(err, "listing nodes for cluster %q", srcEntry.Name)
+			return nil, false, errors.Wrapf(err, "listing nodes for cluster %q", srcEntry.Name)
+		}
+
+		// Empty node list means the source cluster's apiserver answered
+		// but no kubelet has joined yet — bootstrap in progress. The
+		// reconcile completes without error and produces no useful
+		// effect (ensureNodeEndpoints sees zero nodes; pushPeersToTargets
+		// emits an empty desired set). Without a node-Ready watch on
+		// the remote cluster the operator would otherwise wait for the
+		// next external event on this CR; flag the run as incomplete so
+		// the caller requeues.
+		if len(nodes) == 0 {
+			log.Info("source cluster has no nodes yet; will requeue",
+				slog.String("cluster", srcEntry.Name),
+				slog.Duration("after", bootstrapRequeueAfter),
+			)
+
+			incomplete = true
 		}
 
 		r.ensureNodeEndpoints(ctx, log, srcClient, srcEntry, nodes)
@@ -438,13 +489,13 @@ func (r *ClusterMeshReconciler) reconcileAllClusters(ctx context.Context, log *s
 
 		err = r.pushPeersToTargets(ctx, log, mesh, srcEntry, validNodes, &status)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 
 		statuses = append(statuses, status)
 	}
 
-	return statuses, nil
+	return statuses, incomplete, nil
 }
 
 // ensureNodeEndpoints derives a kilo.squat.ai/force-endpoint annotation
