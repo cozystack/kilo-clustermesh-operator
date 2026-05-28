@@ -38,6 +38,7 @@ import (
 	"github.com/squat/kilo-clustermesh-operator/internal/kilonode"
 	"github.com/squat/kilo-clustermesh-operator/internal/multicluster"
 	"github.com/squat/kilo-clustermesh-operator/internal/peer"
+	"github.com/squat/kilo-clustermesh-operator/internal/restart"
 	"github.com/squat/kilo-clustermesh-operator/internal/validation"
 	kilov1alpha1 "github.com/squat/kilo-clustermesh-operator/pkg/kilo/v1alpha1"
 )
@@ -67,16 +68,48 @@ type ClusterMeshReconciler struct {
 func (r *ClusterMeshReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := r.Log.With(slog.String("name", req.Name), slog.String("namespace", req.Namespace))
 
+	err := r.reconcile(ctx, log, req)
+
+	// A NoKindMatchError on a remote cluster's REST mapper survives the
+	// lifetime of cluster.Cluster because the negative discovery entry
+	// is cached. Reset every remote-cluster mapper so the next reconcile
+	// re-discovers the missing kind; the source target is unknown at
+	// this level (the wrapped error carries it as text only), and
+	// Reset() is cheap — it only invalidates the in-memory cache and
+	// the next List() pays a one-time discovery round-trip. Self-heal
+	// without taking the operator pod down, which would drop the leader
+	// lease and inflate to a CrashLoopBackOff after a few stale CRDs.
+	for _, m := range r.Registry.Mappers() {
+		restart.RefreshMapperOnNoMatch(err, m, log)
+	}
+
+	return ctrl.Result{}, err
+}
+
+// SetupWithManager registers the controller with the manager.
+func (r *ClusterMeshReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	err := ctrl.NewControllerManagedBy(mgr).
+		For(&v1alpha1.ClusterMesh{}).
+		Named("clustermesh").
+		WithEventFilter(predicate.Funcs{
+			DeleteFunc: func(event.DeleteEvent) bool { return false },
+		}).
+		Complete(r)
+
+	return errors.Wrap(err, "building clustermesh controller")
+}
+
+func (r *ClusterMeshReconciler) reconcile(ctx context.Context, log *slog.Logger, req ctrl.Request) error {
 	mesh := &v1alpha1.ClusterMesh{}
 
 	err := r.Get(ctx, req.NamespacedName, mesh)
 	if err != nil {
-		return ctrl.Result{}, errors.Wrap(client.IgnoreNotFound(err), "fetching ClusterMesh")
+		return errors.Wrap(client.IgnoreNotFound(err), "fetching ClusterMesh")
 	}
 
 	// Handle deletion via finalizer.
 	if !mesh.DeletionTimestamp.IsZero() {
-		return ctrl.Result{}, r.handleDeletion(ctx, log, mesh)
+		return r.handleDeletion(ctx, log, mesh)
 	}
 
 	// Ensure finalizer is present.
@@ -85,15 +118,15 @@ func (r *ClusterMeshReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 		err = r.Update(ctx, mesh)
 		if err != nil {
-			return ctrl.Result{}, errors.Wrap(err, "adding finalizer")
+			return errors.Wrap(err, "adding finalizer")
 		}
 
-		return ctrl.Result{}, nil
+		return nil
 	}
 
 	// Mesh-level validation.
 	if overlap, msg := r.validateMeshNetworks(ctx, log, mesh); overlap {
-		return ctrl.Result{}, r.setOverlapCondition(ctx, mesh, msg)
+		return r.setOverlapCondition(ctx, mesh, msg)
 	}
 
 	setCondition(mesh, "NetworksOverlap", metav1.ConditionFalse, "NoOverlap", "all CIDRs are disjoint")
@@ -101,7 +134,7 @@ func (r *ClusterMeshReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// Reconcile per-cluster peers.
 	clusterStatuses, err := r.reconcileAllClusters(ctx, log, mesh)
 	if err != nil {
-		return ctrl.Result{}, err
+		return err
 	}
 
 	// Sweep peers whose source-cluster was removed from spec.Clusters since
@@ -118,20 +151,7 @@ func (r *ClusterMeshReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// the global cleanup pass so the cluster always converges.
 	r.cleanupOrphanMeshPeers(ctx, log, mesh.Namespace)
 
-	return ctrl.Result{}, r.updateStatus(ctx, mesh, clusterStatuses)
-}
-
-// SetupWithManager registers the controller with the manager.
-func (r *ClusterMeshReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	err := ctrl.NewControllerManagedBy(mgr).
-		For(&v1alpha1.ClusterMesh{}).
-		Named("clustermesh").
-		WithEventFilter(predicate.Funcs{
-			DeleteFunc: func(event.DeleteEvent) bool { return false },
-		}).
-		Complete(r)
-
-	return errors.Wrap(err, "building clustermesh controller")
+	return r.updateStatus(ctx, mesh, clusterStatuses)
 }
 
 // cleanupSweepTimeout caps the per-target list/delete pass time so a single

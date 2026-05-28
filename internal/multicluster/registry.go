@@ -73,9 +73,12 @@ func (d *directCluster) GetFieldIndexer() client.FieldIndexer {
 
 func (d *directCluster) GetCache() cache.Cache { panic("directCluster: GetCache not implemented") }
 
-func (d *directCluster) GetRESTMapper() meta.RESTMapper {
-	panic("directCluster: GetRESTMapper not implemented")
-}
+// GetRESTMapper returns nil. directCluster is only used in integration
+// tests that drive the reconciler against envtest-built clients; the
+// stale-discovery recovery path treats a nil mapper as a no-op, so
+// returning nil keeps Mappers() callable without panicking the test
+// process.
+func (d *directCluster) GetRESTMapper() meta.RESTMapper { return nil }
 
 func (d *directCluster) GetAPIReader() client.Reader {
 	panic("directCluster: GetAPIReader not implemented")
@@ -157,8 +160,15 @@ func Build(
 			reg.local = entry.Name
 		}
 
-		c, err := cluster.New(cfg, func(o *cluster.Options) {
-			o.Scheme = scheme
+		c, err := cluster.New(cfg, func(opts *cluster.Options) {
+			opts.Scheme = scheme
+			// Replace controller-runtime's default dynamic mapper with
+			// the resettable wrapper so internal/restart can invalidate
+			// the discovery cache through meta.ResettableRESTMapper.
+			// The unexported *apiutil.mapper that NewDynamicRESTMapper
+			// returns does not implement Reset(), which would silently
+			// turn the recovery path into a no-op.
+			opts.MapperProvider = newResettableDynamicMapper
 		})
 		if err != nil {
 			log.Warn("skipping cluster entry during registry build",
@@ -238,4 +248,24 @@ func (r *ClusterRegistry) Clusters() []string {
 // Used by main.go to register them with mgr.Add().
 func (r *ClusterRegistry) All() map[string]cluster.Cluster {
 	return r.clusters
+}
+
+// Mappers returns the REST mapper of every registered cluster, in
+// arbitrary order. Nil mappers (e.g. from test-only directCluster) are
+// skipped so callers can iterate without nil-guarding. Used by the
+// reconciler to invalidate stale discovery caches after a
+// NoKindMatchError without restarting the operator pod.
+func (r *ClusterRegistry) Mappers() []meta.RESTMapper {
+	mappers := make([]meta.RESTMapper, 0, len(r.clusters))
+
+	for _, c := range r.clusters {
+		m := c.GetRESTMapper()
+		if m == nil {
+			continue
+		}
+
+		mappers = append(mappers, m)
+	}
+
+	return mappers
 }
