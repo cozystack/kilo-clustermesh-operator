@@ -27,67 +27,91 @@ import (
 
 var errUnrelated = cockerrors.New("network blew up")
 
-func TestTriggerOnStaleDiscovery_NilErr(t *testing.T) {
-	called := false
-	cancel := func() { called = true }
+// resettableSpy is a meta.ResettableRESTMapper that counts Reset() calls
+// and delegates the rest of the interface to an unused fallback. The
+// helper only ever invokes Reset; the other methods are not exercised
+// from production code paths under test.
+type resettableSpy struct {
+	meta.RESTMapper
 
-	triggered := TriggerOnStaleDiscovery(nil, cancel, testLogger())
-
-	assert.False(t, triggered, "nil err must not trigger")
-	assert.False(t, called, "cancel must not be invoked on nil err")
+	resets int
 }
 
-func TestTriggerOnStaleDiscovery_NilCancel(t *testing.T) {
+func (r *resettableSpy) Reset() { r.resets++ }
+
+func TestRefreshMapperOnNoMatch_NilErr(t *testing.T) {
+	spy := &resettableSpy{}
+
+	called := RefreshMapperOnNoMatch(nil, spy, testLogger())
+
+	assert.False(t, called, "nil err must not reset")
+	assert.Equal(t, 0, spy.resets, "Reset must not be invoked on nil err")
+}
+
+func TestRefreshMapperOnNoMatch_NilMapper(t *testing.T) {
 	noMatch := &meta.NoKindMatchError{GroupKind: schema.GroupKind{Group: "kilo.squat.ai", Kind: "Peer"}}
 
-	triggered := TriggerOnStaleDiscovery(noMatch, nil, testLogger())
+	called := RefreshMapperOnNoMatch(noMatch, nil, testLogger())
 
-	assert.False(t, triggered, "nil cancel must yield false even for NoMatch error")
+	assert.False(t, called, "nil mapper must yield false even for NoMatch error")
 }
 
-func TestTriggerOnStaleDiscovery_UnrelatedErr(t *testing.T) {
-	called := false
-	cancel := func() { called = true }
+func TestRefreshMapperOnNoMatch_UnrelatedErr(t *testing.T) {
+	spy := &resettableSpy{}
 
-	triggered := TriggerOnStaleDiscovery(errUnrelated, cancel, testLogger())
+	called := RefreshMapperOnNoMatch(errUnrelated, spy, testLogger())
 
-	assert.False(t, triggered, "unrelated err must not trigger")
-	assert.False(t, called, "cancel must not be invoked for non-NoMatch errors")
+	assert.False(t, called, "unrelated err must not reset")
+	assert.Equal(t, 0, spy.resets, "Reset must not be invoked for non-NoMatch errors")
 }
 
-func TestTriggerOnStaleDiscovery_PlainNoMatch(t *testing.T) {
-	called := false
-	cancel := func() { called = true }
-
+func TestRefreshMapperOnNoMatch_PlainNoMatch(t *testing.T) {
+	spy := &resettableSpy{}
 	noMatch := &meta.NoKindMatchError{GroupKind: schema.GroupKind{Group: "kilo.squat.ai", Kind: "Peer"}}
 
-	triggered := TriggerOnStaleDiscovery(noMatch, cancel, testLogger())
+	called := RefreshMapperOnNoMatch(noMatch, spy, testLogger())
 
-	assert.True(t, triggered, "plain NoKindMatchError must trigger")
-	assert.True(t, called, "cancel must be invoked")
+	assert.True(t, called, "plain NoKindMatchError must reset")
+	assert.Equal(t, 1, spy.resets, "Reset must be invoked exactly once")
 }
 
-func TestTriggerOnStaleDiscovery_WrappedNoMatch(t *testing.T) {
-	called := false
-	cancel := func() { called = true }
-
+func TestRefreshMapperOnNoMatch_WrappedNoMatch(t *testing.T) {
+	spy := &resettableSpy{}
 	noMatch := &meta.NoKindMatchError{GroupKind: schema.GroupKind{Group: "kilo.squat.ai", Kind: "Peer"}}
 	wrapped := cockerrors.Wrap(cockerrors.Wrap(noMatch, "listing existing peers"), "reconciling peers from \"a\" to \"b\"")
 
-	triggered := TriggerOnStaleDiscovery(wrapped, cancel, testLogger())
+	called := RefreshMapperOnNoMatch(wrapped, spy, testLogger())
 
-	assert.True(t, triggered, "wrapped NoKindMatchError must trigger (the controller wraps the error twice in production)")
-	assert.True(t, called, "cancel must be invoked")
+	assert.True(t, called, "wrapped NoKindMatchError must reset (the controller wraps the error twice in production)")
+	assert.Equal(t, 1, spy.resets)
 }
 
-func TestTriggerOnStaleDiscovery_NilLogger(t *testing.T) {
-	called := false
-	cancel := func() { called = true }
+func TestRefreshMapperOnNoMatch_NonResettableMapper(t *testing.T) {
+	// A bare meta.RESTMapper that does not implement ResettableRESTMapper.
+	// Production builds always get a resettable mapper from
+	// apiutil.NewDynamicRESTMapper, but tests/fakes may pass anything.
+	bare := stubRESTMapper{}
 
+	called := RefreshMapperOnNoMatch(
+		&meta.NoKindMatchError{GroupKind: schema.GroupKind{Group: "g", Kind: "K"}},
+		bare,
+		testLogger(),
+	)
+
+	assert.False(t, called, "non-resettable mapper must yield false")
+}
+
+func TestRefreshMapperOnNoMatch_NilLogger(t *testing.T) {
+	spy := &resettableSpy{}
 	noMatch := &meta.NoKindMatchError{GroupKind: schema.GroupKind{Group: "kilo.squat.ai", Kind: "Peer"}}
 
 	assert.NotPanics(t, func() {
-		TriggerOnStaleDiscovery(noMatch, cancel, nil)
+		RefreshMapperOnNoMatch(noMatch, spy, nil)
 	}, "nil logger must be tolerated")
-	assert.True(t, called)
+	assert.Equal(t, 1, spy.resets)
 }
+
+// stubRESTMapper is a placeholder meta.RESTMapper that does not implement
+// ResettableRESTMapper. It is used only to verify the type-assertion
+// guard; none of its methods are called in tests.
+type stubRESTMapper struct{ meta.RESTMapper }

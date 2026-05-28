@@ -62,13 +62,6 @@ type ClusterMeshReconciler struct {
 	Registry *multicluster.ClusterRegistry
 	Log      *slog.Logger
 	Recorder events.EventRecorder
-
-	// Cancel terminates the manager's root context. It is fired when a
-	// reconcile error indicates the remote-cluster discovery cache is
-	// stale (e.g. a freshly bootstrapped tenant's Peer CRD landed after
-	// our first List); kubelet then restarts the pod, rebuilding the
-	// registry against current discovery. May be nil in tests.
-	Cancel context.CancelFunc
 }
 
 // Reconcile implements the main reconciliation loop for ClusterMesh objects.
@@ -78,11 +71,17 @@ func (r *ClusterMeshReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	err := r.reconcile(ctx, log, req)
 
 	// A NoKindMatchError on a remote cluster's REST mapper survives the
-	// lifetime of cluster.Cluster because the negative discovery entry is
-	// cached. Self-cancel so kubelet rebuilds the registry against fresh
-	// discovery — same recovery shape as ChangeWatcher's fingerprint-drift
-	// restart.
-	restart.TriggerOnStaleDiscovery(err, r.Cancel, log)
+	// lifetime of cluster.Cluster because the negative discovery entry
+	// is cached. Reset every remote-cluster mapper so the next reconcile
+	// re-discovers the missing kind; the source target is unknown at
+	// this level (the wrapped error carries it as text only), and
+	// Reset() is cheap — it only invalidates the in-memory cache and
+	// the next List() pays a one-time discovery round-trip. Self-heal
+	// without taking the operator pod down, which would drop the leader
+	// lease and inflate to a CrashLoopBackOff after a few stale CRDs.
+	for _, m := range r.Registry.Mappers() {
+		restart.RefreshMapperOnNoMatch(err, m, log)
+	}
 
 	return ctrl.Result{}, err
 }

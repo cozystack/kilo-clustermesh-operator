@@ -17,32 +17,35 @@ limitations under the License.
 package restart
 
 import (
-	"context"
 	"errors"
 	"log/slog"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 )
 
-// TriggerOnStaleDiscovery cancels the manager's context when err carries a
-// NoKindMatchError, asking the pod to terminate so kubelet restarts it with
-// a freshly-built remote-cluster registry.
+// RefreshMapperOnNoMatch resets the given REST mapper when err carries a
+// NoKindMatchError. Without this, controller-runtime's REST mapper caches
+// the negative discovery entry for the lifetime of the cluster.Cluster — a
+// freshly bootstrapped tenant that installs its Peer CRD only after our
+// first List(PeerList{}) would deadlock the reconcile loop forever, with
+// requeue-with-backoff never refreshing discovery.
 //
-// Why: each remote cluster in the registry owns a controller-runtime
-// cluster.Cluster, whose REST mapper caches discovery results. When a
-// freshly-bootstrapped tenant cluster installs its Peer CRD only after the
-// ClusterMesh CR is reconciled for the first time, the mapper caches a
-// negative result and never refreshes — every subsequent List(PeerList{})
-// against that target fails with NoKindMatchError until the pod restarts.
-// This mirrors ChangeWatcher's self-restart pattern, which already handles
-// fingerprint changes by cancelling the same context.
+// Resetting the mapper instead of restarting the operator pod avoids
+// kubelet CrashLoopBackOff (which inflates to a 5-minute wait after a
+// handful of restarts), lets the manager keep its leader lease, and
+// scopes recovery to the one cluster whose CRD state actually drifted.
+// The next reconcile picks up the fresh mapping via Discovery and the
+// peer push succeeds without further intervention.
 //
-// cancel may be nil (tests/fakes) — the call is then a no-op.
+// mapper may be nil — the call is then a no-op. If the mapper does not
+// implement meta.ResettableRESTMapper (an in-memory test fake, say) the
+// call also no-ops; that is acceptable because the production code path
+// always builds clusters through controller-runtime's dynamic mapper.
 // log may be nil — logging is then skipped.
-// Returns true if cancel was invoked, so callers can avoid further work
-// that would race with the pod shutdown.
-func TriggerOnStaleDiscovery(err error, cancel context.CancelFunc, log *slog.Logger) bool {
-	if err == nil || cancel == nil {
+// Returns true when Reset() was actually invoked, so callers can avoid
+// double-emitting the recovery event.
+func RefreshMapperOnNoMatch(err error, mapper meta.RESTMapper, log *slog.Logger) bool {
+	if err == nil || mapper == nil {
 		return false
 	}
 
@@ -51,14 +54,19 @@ func TriggerOnStaleDiscovery(err error, cancel context.CancelFunc, log *slog.Log
 		return false
 	}
 
+	resettable, ok := mapper.(meta.ResettableRESTMapper)
+	if !ok {
+		return false
+	}
+
+	resettable.Reset()
+
 	if log != nil {
-		log.Info("remote cluster discovery returned NoMatchError; triggering self-restart to refresh REST mapper",
+		log.Info("reset target cluster REST mapper after NoMatchError; next reconcile will refresh discovery",
 			slog.String("groupKind", noMatch.GroupKind.String()),
 			slog.String("error", err.Error()),
 		)
 	}
-
-	cancel()
 
 	return true
 }
