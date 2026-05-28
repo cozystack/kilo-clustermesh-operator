@@ -81,6 +81,30 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # On tag pushes the release version is authoritative: stamp it into
+      # both Chart.yaml files (operator chart + Cozystack wrapper) before
+      # `helm package` so the published artifacts carry the tag instead
+      # of the in-repo dev-base appVersion. The repo's Chart.yaml stays
+      # at the dev base (0.1.0); only tagged releases get stamped.
+      - name: Stamp release version into chart metadata
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          ver="${GITHUB_REF#refs/tags/v}"
+          sed --in-place \
+            --expression "s/^version: .*/version: ${ver}/" \
+            --expression "s/^appVersion: .*/appVersion: \"${ver}\"/" \
+            charts/kilo-clustermesh-operator/Chart.yaml
+          # Wrapper: align appVersion AND the local-path dependency pin
+          # on the operator chart so `helm dependency update` resolves
+          # against the stamped inner chart.
+          sed --in-place \
+            --expression "s/^appVersion: .*/appVersion: \"${ver}\"/" \
+            --expression "s/^    version: \".*\"/    version: \"${ver}\"/" \
+            packages/system/kilo-clustermesh-operator/Chart.yaml
+          echo "--- stamped operator chart ---"
+          cat charts/kilo-clustermesh-operator/Chart.yaml
+          echo "--- stamped wrapper chart ---"
+          cat packages/system/kilo-clustermesh-operator/Chart.yaml
       - name: Package and push operator chart
         run: |
           # Push under /charts/ subpath so the chart's OCI repository does
