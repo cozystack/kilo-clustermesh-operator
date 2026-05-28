@@ -160,8 +160,15 @@ func Build(
 			reg.local = entry.Name
 		}
 
-		c, err := cluster.New(cfg, func(o *cluster.Options) {
-			o.Scheme = scheme
+		c, err := cluster.New(cfg, func(opts *cluster.Options) {
+			opts.Scheme = scheme
+			// Replace controller-runtime's default dynamic mapper with
+			// the resettable wrapper so internal/restart can invalidate
+			// the discovery cache through meta.ResettableRESTMapper.
+			// The unexported *apiutil.mapper that NewDynamicRESTMapper
+			// returns does not implement Reset(), which would silently
+			// turn the recovery path into a no-op.
+			opts.MapperProvider = newResettableDynamicMapper
 		})
 		if err != nil {
 			log.Warn("skipping cluster entry during registry build",

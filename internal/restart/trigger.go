@@ -62,7 +62,7 @@ func RefreshMapperOnNoMatch(err error, mapper meta.RESTMapper, log *slog.Logger)
 	resettable.Reset()
 
 	if log != nil {
-		log.Info("reset target cluster REST mapper after NoMatchError; next reconcile will refresh discovery",
+		log.Info("reset remote-cluster REST mapper after NoMatchError; next reconcile will refresh discovery",
 			slog.String("groupKind", noMatch.GroupKind.String()),
 			slog.String("error", err.Error()),
 		)
