@@ -45,17 +45,28 @@ import (
 
 const finalizerName = "kilo-clustermesh.io/cleanup"
 
-// bootstrapRequeueAfter caps the wait between reconcile attempts while at
-// least one source cluster is still bootstrapping (kubeconfig secret not
-// yet created, or apiserver up but no nodes joined yet). The reconciler
-// watches only ClusterMesh CRs, not the Nodes of remote clusters, so a
-// reconcile that runs while the source is empty completes silently with
-// no error and no useful work — controller-runtime then has nothing to
-// requeue on, and the next attempt has to wait for an external trigger
-// (Cozystack Package controller re-applying the CR, etc.). That gap
-// produced a 17-minute mesh-up delay in the wild for a tenant whose VM
-// landed a few minutes after the operator's first reconcile. A short
-// periodic requeue is a cheap belt-and-braces against this race.
+// bootstrapRequeueAfter caps the wait between reconcile attempts while
+// at least one source cluster is still bootstrapping. "Bootstrapping"
+// here means any of:
+//
+//   - kubeconfig secret not yet merged into the registry,
+//   - apiserver up but no kubelet has joined yet (OpenStack VM still
+//     provisioning, etc.),
+//   - nodes have joined but the kilo daemon has not yet written the
+//     per-node annotations (wireguard-ip, public-key) that
+//     validateNode requires.
+//
+// The reconciler watches only ClusterMesh CRs, not the Nodes of remote
+// clusters, so a reconcile that runs while no source node is valid yet
+// completes silently with no error and no useful work — controller
+// runtime then has nothing to requeue on, and the next attempt has to
+// wait for an external trigger (Cozystack Package controller
+// re-applying the CR, etc.). That gap produced a 17-minute mesh-up
+// delay in the wild for a tenant whose VM landed a few minutes after
+// the operator's first reconcile, and an indefinite stall for a tenant
+// whose kilo daemon needed a few extra seconds to annotate the node
+// after kubelet was already Ready. A short periodic requeue is a cheap
+// belt-and-braces against this race.
 const bootstrapRequeueAfter = 30 * time.Second
 
 // +kubebuilder:rbac:groups=kilo.squat.ai,resources=clustermeshes,verbs=get;list;watch;update;patch
@@ -465,27 +476,44 @@ func (r *ClusterMeshReconciler) reconcileAllClusters(ctx context.Context, log *s
 			return nil, false, errors.Wrapf(err, "listing nodes for cluster %q", srcEntry.Name)
 		}
 
-		// Empty node list means the source cluster's apiserver answered
-		// but no kubelet has joined yet — bootstrap in progress. The
-		// reconcile completes without error and produces no useful
-		// effect (ensureNodeEndpoints sees zero nodes; pushPeersToTargets
-		// emits an empty desired set). Without a node-Ready watch on
-		// the remote cluster the operator would otherwise wait for the
-		// next external event on this CR; flag the run as incomplete so
-		// the caller requeues.
-		if len(nodes) == 0 {
-			log.Info("source cluster has no nodes yet; will requeue",
+		r.ensureNodeEndpoints(ctx, log, srcClient, srcEntry, nodes)
+
+		validNodes, skipped := r.filterNodes(log, mesh, nodes, srcEntry)
+		status := v1alpha1.ClusterStatus{Name: srcEntry.Name, SkippedNodes: skipped}
+
+		// Source has no nodes that pass validateNode. This covers two
+		// related bootstrap-in-progress shapes:
+		//
+		//   - len(nodes) == 0 — apiserver up but no kubelet joined yet
+		//     (e.g. OpenStack VM still being provisioned).
+		//   - len(nodes) > 0 but all of them skipped — typically a
+		//     just-joined Ready node whose kilo daemon has not yet
+		//     written the kilo.squat.ai/{wireguard-ip,public-key,...}
+		//     annotations (validateNode rejects on NodeNoWireguardIP).
+		//
+		// In both shapes the reconcile completes without error and
+		// pushPeersToTargets emits an empty desired set, so
+		// controller-runtime has nothing to requeue on. The operator
+		// does not watch Nodes in remote clusters, so it does not
+		// notice when annotations land. Flag the run as incomplete so
+		// the caller requeues; once the kilo daemon finishes its setup,
+		// the next requeue tick produces a valid peer push and the
+		// incomplete flag drops back to false.
+		//
+		// In steady state ceph as a source has cephstg01 valid (the
+		// location leader) and cephstg02/03 skipped by design (kilo
+		// per-location granularity), so validNodes > 0 and the requeue
+		// timer does not fire.
+		if len(validNodes) == 0 {
+			log.Info("source cluster has no valid nodes yet; will requeue",
 				slog.String("cluster", srcEntry.Name),
+				slog.Int("nodes", len(nodes)),
+				slog.Int("skipped", skipped),
 				slog.Duration("after", bootstrapRequeueAfter),
 			)
 
 			incomplete = true
 		}
-
-		r.ensureNodeEndpoints(ctx, log, srcClient, srcEntry, nodes)
-
-		validNodes, skipped := r.filterNodes(log, mesh, nodes, srcEntry)
-		status := v1alpha1.ClusterStatus{Name: srcEntry.Name, SkippedNodes: skipped}
 
 		err = r.pushPeersToTargets(ctx, log, mesh, srcEntry, validNodes, &status)
 		if err != nil {
