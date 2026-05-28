@@ -45,17 +45,28 @@ import (
 
 const finalizerName = "kilo-clustermesh.io/cleanup"
 
-// bootstrapRequeueAfter caps the wait between reconcile attempts while at
-// least one source cluster is still bootstrapping (kubeconfig secret not
-// yet created, or apiserver up but no nodes joined yet). The reconciler
-// watches only ClusterMesh CRs, not the Nodes of remote clusters, so a
-// reconcile that runs while the source is empty completes silently with
-// no error and no useful work — controller-runtime then has nothing to
-// requeue on, and the next attempt has to wait for an external trigger
-// (Cozystack Package controller re-applying the CR, etc.). That gap
-// produced a 17-minute mesh-up delay in the wild for a tenant whose VM
-// landed a few minutes after the operator's first reconcile. A short
-// periodic requeue is a cheap belt-and-braces against this race.
+// bootstrapRequeueAfter caps the wait between reconcile attempts while
+// at least one source cluster is still bootstrapping. "Bootstrapping"
+// here means any of:
+//
+//   - kubeconfig secret not yet merged into the registry,
+//   - apiserver up but no kubelet has joined yet (OpenStack VM still
+//     provisioning, etc.),
+//   - nodes have joined but the kilo daemon has not yet written the
+//     per-node annotations (wireguard-ip, public-key) that
+//     validateNode requires.
+//
+// The reconciler watches only ClusterMesh CRs, not the Nodes of remote
+// clusters, so a reconcile that runs while no source node is valid yet
+// completes silently with no error and no useful work — controller
+// runtime then has nothing to requeue on, and the next attempt has to
+// wait for an external trigger (Cozystack Package controller
+// re-applying the CR, etc.). That gap produced a 17-minute mesh-up
+// delay in the wild for a tenant whose VM landed a few minutes after
+// the operator's first reconcile, and an indefinite stall for a tenant
+// whose kilo daemon needed a few extra seconds to annotate the node
+// after kubelet was already Ready. A short periodic requeue is a cheap
+// belt-and-braces against this race.
 const bootstrapRequeueAfter = 30 * time.Second
 
 // +kubebuilder:rbac:groups=kilo.squat.ai,resources=clustermeshes,verbs=get;list;watch;update;patch
@@ -465,27 +476,57 @@ func (r *ClusterMeshReconciler) reconcileAllClusters(ctx context.Context, log *s
 			return nil, false, errors.Wrapf(err, "listing nodes for cluster %q", srcEntry.Name)
 		}
 
-		// Empty node list means the source cluster's apiserver answered
-		// but no kubelet has joined yet — bootstrap in progress. The
-		// reconcile completes without error and produces no useful
-		// effect (ensureNodeEndpoints sees zero nodes; pushPeersToTargets
-		// emits an empty desired set). Without a node-Ready watch on
-		// the remote cluster the operator would otherwise wait for the
-		// next external event on this CR; flag the run as incomplete so
-		// the caller requeues.
-		if len(nodes) == 0 {
-			log.Info("source cluster has no nodes yet; will requeue",
+		r.ensureNodeEndpoints(ctx, log, srcClient, srcEntry, nodes)
+
+		validNodes, skipped, transientSkipped := r.filterNodes(log, mesh, nodes, srcEntry)
+		status := v1alpha1.ClusterStatus{Name: srcEntry.Name, SkippedNodes: skipped}
+
+		// Source has no nodes that pass validateNode. Decide whether
+		// to schedule a periodic requeue based on whether there is a
+		// reason to expect recovery on its own:
+		//
+		//   - len(nodes) == 0 — apiserver up but no kubelet joined
+		//     yet (e.g. OpenStack VM still being provisioned). Will
+		//     resolve as the cluster settles. Requeue.
+		//   - transientSkipped > 0 — at least one node is in a
+		//     bootstrap-pending skip state (NodeNoWireguardIP /
+		//     NodeNoPublicKey / NodeNoPodCIDR / NodeNoEndpoint). The
+		//     kilo daemon or node controller will write the missing
+		//     annotation shortly. Requeue.
+		//   - all skips are permanent (PodCIDROutOfRange, WGIPInvalid,
+		//     WGIPOutOfRange, WGIPDuplicate, EndpointInvalid) — these
+		//     are configuration / data errors that retry cannot fix.
+		//     Logging a WARN and leaving the controller idle is
+		//     better than burning 30s reconciles forever; ops needs
+		//     to see the static error and act.
+		//
+		// In steady state ceph as a source has cephstg01 valid (the
+		// location leader) and cephstg02/03 skipped by design (kilo
+		// per-location granularity, NodeNoWireguardIP — classified as
+		// transient by IsTransient even though it is in fact
+		// permanent for those nodes). That would normally arm the
+		// requeue forever, but validNodes > 0 because the leader
+		// passes, so the timer does not fire. The "all transient,
+		// none valid" shape only triggers during real bootstrap
+		// windows.
+		switch {
+		case len(validNodes) == 0 && (len(nodes) == 0 || transientSkipped > 0):
+			log.Info("source cluster has no valid nodes yet; will requeue",
 				slog.String("cluster", srcEntry.Name),
+				slog.Int("nodes", len(nodes)),
+				slog.Int("skipped", skipped),
+				slog.Int("transientSkipped", transientSkipped),
 				slog.Duration("after", bootstrapRequeueAfter),
 			)
 
 			incomplete = true
+		case len(validNodes) == 0 && skipped > 0:
+			log.Warn("source cluster has no valid nodes and all skips are permanent; mesh will not converge without intervention",
+				slog.String("cluster", srcEntry.Name),
+				slog.Int("nodes", len(nodes)),
+				slog.Int("skipped", skipped),
+			)
 		}
-
-		r.ensureNodeEndpoints(ctx, log, srcClient, srcEntry, nodes)
-
-		validNodes, skipped := r.filterNodes(log, mesh, nodes, srcEntry)
-		status := v1alpha1.ClusterStatus{Name: srcEntry.Name, SkippedNodes: skipped}
 
 		err = r.pushPeersToTargets(ctx, log, mesh, srcEntry, validNodes, &status)
 		if err != nil {
@@ -533,9 +574,14 @@ func (r *ClusterMeshReconciler) ensureNodeEndpoints(ctx context.Context, log *sl
 	}
 }
 
-// filterNodes validates nodes and returns valid nodes and the count of skipped ones.
-func (r *ClusterMeshReconciler) filterNodes(log *slog.Logger, mesh *v1alpha1.ClusterMesh, nodes []corev1.Node, entry *v1alpha1.ClusterEntry) ([]*corev1.Node, int) {
+// filterNodes validates nodes and returns valid nodes, the total count
+// of skipped ones, and how many of those skips are transient (i.e.
+// expected to resolve as the kilo daemon / kubelet finishes bootstrap;
+// see validation.IsTransient). The caller uses transientSkipped to
+// decide whether scheduling a periodic requeue would do any good.
+func (r *ClusterMeshReconciler) filterNodes(log *slog.Logger, mesh *v1alpha1.ClusterMesh, nodes []corev1.Node, entry *v1alpha1.ClusterEntry) ([]*corev1.Node, int, int) {
 	skipped := 0
+	transientSkipped := 0
 	ptrs := make([]*corev1.Node, 0, len(nodes))
 
 	for i := range nodes {
@@ -553,6 +599,8 @@ func (r *ClusterMeshReconciler) filterNodes(log *slog.Logger, mesh *v1alpha1.Clu
 			)
 			r.Recorder.Eventf(mesh, nil, corev1.EventTypeWarning, string(reason), "SkipNodePeering", "node %s has duplicate WireGuard IP", node.Name)
 
+			// Duplicate WG IPs are always a configuration error — two
+			// nodes claiming the same address. No retry will fix it.
 			skipped++
 
 			continue
@@ -569,13 +617,17 @@ func (r *ClusterMeshReconciler) filterNodes(log *slog.Logger, mesh *v1alpha1.Clu
 
 			skipped++
 
+			if validation.IsTransient(reason) {
+				transientSkipped++
+			}
+
 			continue
 		}
 
 		valid = append(valid, node)
 	}
 
-	return valid, skipped
+	return valid, skipped, transientSkipped
 }
 
 // pushPeersToTargets reconciles peers for srcEntry's nodes into every other cluster.

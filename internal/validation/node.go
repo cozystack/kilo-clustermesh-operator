@@ -41,6 +41,45 @@ const (
 	ReasonEndpointInvalid   NodeSkipReason = "NodeEndpointInvalid"
 )
 
+// IsTransient reports whether a NodeSkipReason represents a
+// bootstrap-in-progress state — i.e. the validateNode failure is
+// expected to resolve on its own once the kilo daemon (or the node
+// controller) writes the missing annotation. Permanent skip reasons
+// (CIDR overlaps, malformed annotations, duplicate WG IPs) require an
+// operator change and will never resolve via retry.
+//
+// Used by the controller to decide whether to schedule a periodic
+// requeue when the source cluster has no valid nodes: transient → yes
+// (the daemon may finish setup in seconds), permanent → no (silent
+// retry would burn reconciles indefinitely; the operator should see
+// the WARN log and intervene).
+func IsTransient(reason NodeSkipReason) bool {
+	switch reason {
+	// Bootstrap-pending: kilo daemon or node controller will write
+	// the missing annotation, and validateNode will pass on the next
+	// reconcile cycle.
+	case ReasonNoPodCIDR,
+		ReasonNoWireguardIP,
+		ReasonNoPublicKey,
+		ReasonNoEndpoint:
+		return true
+	// Permanent: configuration mismatch (CIDR out of range, duplicate
+	// IPs) or malformed annotation values. Retry without operator
+	// intervention will not change the outcome.
+	case ReasonPodCIDROutOfRange,
+		ReasonWGIPInvalid,
+		ReasonWGIPOutOfRange,
+		ReasonWGIPDuplicate,
+		ReasonEndpointInvalid:
+		return false
+	}
+
+	// Unknown reason: fail closed. New transient reasons should be
+	// added to the first case explicitly so that "transient" is an
+	// allowlist, not an oversight.
+	return false
+}
+
 // ValidateNode checks whether a node is eligible to be peered.
 // It validates the node's PodCIDR against the cluster's PodCIDRs,
 // the node's WireGuard IP against the cluster's WireguardCIDR, and

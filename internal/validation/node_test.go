@@ -307,3 +307,38 @@ func TestFindDuplicateWGIPs(t *testing.T) {
 		})
 	}
 }
+
+func TestIsTransient(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		reason validation.NodeSkipReason
+		want   bool
+	}{
+		// Bootstrap-pending states that resolve as kubelet / kilo daemon catch up.
+		{validation.ReasonNoPodCIDR, true},
+		{validation.ReasonNoWireguardIP, true},
+		{validation.ReasonNoPublicKey, true},
+		{validation.ReasonNoEndpoint, true},
+
+		// Permanent config / data errors. The operator should not requeue
+		// silently — these require human intervention.
+		{validation.ReasonPodCIDROutOfRange, false},
+		{validation.ReasonWGIPInvalid, false},
+		{validation.ReasonWGIPOutOfRange, false},
+		{validation.ReasonWGIPDuplicate, false},
+		{validation.ReasonEndpointInvalid, false},
+
+		// Unknown reason defaults to permanent — fail closed.
+		{validation.NodeSkipReason("UnknownReason"), false},
+		{validation.NodeSkipReason(""), false},
+	}
+
+	for _, testCase := range cases {
+		t.Run(string(testCase.reason), func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, testCase.want, validation.IsTransient(testCase.reason))
+		})
+	}
+}
