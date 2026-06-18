@@ -134,42 +134,75 @@ func reconcileDesired(
 
 	for name, desiredPeer := range desiredByName {
 		existingPeer, exists := existingByName[name]
-		if !exists {
-			// Before creating, check whether a Peer with the same publicKey already
-			// exists under a different name (created by another mesh's reconcile).
-			// If so, merge our AllowedIPs into that canonical Peer instead of
-			// creating a duplicate that would corrupt WireGuard's peer table.
-			if canonical, hasDup := allByPubKey[desiredPeer.Spec.PublicKey]; hasDup && canonical.Name != name {
-				merged := mergeAllowedIPs(canonical.Spec.AllowedIPs, desiredPeer.Spec.AllowedIPs)
-				if !allowedIPsEqual(merged, canonical.Spec.AllowedIPs) {
-					updated := canonical.DeepCopy()
-					updated.Spec.AllowedIPs = merged
-					if err := remoteClient.Update(ctx, updated); err != nil {
-						errs = append(errs, errors.Wrapf(err, "merging AllowedIPs into canonical peer %s (publicKey collision with %s)", canonical.Name, name))
-					}
-				}
-				continue
-			}
 
-			err := remoteClient.Create(ctx, desiredPeer.DeepCopy())
-			if err != nil {
-				errs = append(errs, errors.Wrapf(err, "creating peer %s", name))
-			}
+		if !exists {
+			errs = append(errs, createOrMerge(ctx, remoteClient, name, desiredPeer, allByPubKey)...)
 
 			continue
 		}
 
-		if !peerSpecEqual(existingPeer.Spec, desiredPeer.Spec) {
-			existingPeer.Spec = desiredPeer.Spec
+		if peerSpecEqual(existingPeer.Spec, desiredPeer.Spec) {
+			continue
+		}
 
-			err := remoteClient.Update(ctx, existingPeer)
-			if err != nil {
-				errs = append(errs, errors.Wrapf(err, "updating peer %s", name))
-			}
+		existingPeer.Spec = desiredPeer.Spec
+
+		err := remoteClient.Update(ctx, existingPeer)
+		if err != nil {
+			errs = append(errs, errors.Wrapf(err, "updating peer %s", name))
 		}
 	}
 
 	return errs
+}
+
+// createOrMerge either creates a new Peer or, when a Peer with the same
+// publicKey already exists under a different name, merges the desired
+// AllowedIPs into that canonical Peer. This prevents WireGuard from seeing
+// two peers with identical public keys, which would silently clear the
+// AllowedIPs of the first entry.
+func createOrMerge(
+	ctx context.Context,
+	remoteClient client.Client,
+	name string,
+	desiredPeer *kilov1alpha1.Peer,
+	allByPubKey map[string]*kilov1alpha1.Peer,
+) []error {
+	canonical, hasDup := allByPubKey[desiredPeer.Spec.PublicKey]
+	if hasDup && canonical.Name != name {
+		return mergeIntoCanonical(ctx, remoteClient, canonical, desiredPeer.Spec.AllowedIPs, name)
+	}
+
+	err := remoteClient.Create(ctx, desiredPeer.DeepCopy())
+	if err != nil {
+		return []error{errors.Wrapf(err, "creating peer %s", name)}
+	}
+
+	return nil
+}
+
+// mergeIntoCanonical merges newIPs into an existing canonical Peer's AllowedIPs.
+func mergeIntoCanonical(
+	ctx context.Context,
+	remoteClient client.Client,
+	canonical *kilov1alpha1.Peer,
+	newIPs []string,
+	collidingName string,
+) []error {
+	merged := mergeAllowedIPs(canonical.Spec.AllowedIPs, newIPs)
+	if allowedIPsEqual(merged, canonical.Spec.AllowedIPs) {
+		return nil
+	}
+
+	updated := canonical.DeepCopy()
+	updated.Spec.AllowedIPs = merged
+
+	err := remoteClient.Update(ctx, updated)
+	if err != nil {
+		return []error{errors.Wrapf(err, "merging AllowedIPs into canonical peer %s (publicKey collision with %s)", canonical.Name, collidingName)}
+	}
+
+	return nil
 }
 
 func deleteOrphans(
@@ -256,15 +289,20 @@ func allowedIPsEqual(ipsA, ipsB []string) bool {
 // collisions before creating new Peer CRDs.
 func buildAllPeersByPublicKey(ctx context.Context, remoteClient client.Client) (map[string]*kilov1alpha1.Peer, error) {
 	all := &kilov1alpha1.PeerList{}
-	if err := remoteClient.List(ctx, all); err != nil {
-		return nil, err
+
+	err := remoteClient.List(ctx, all)
+	if err != nil {
+		return nil, errors.Wrap(err, "listing all peers")
 	}
 
 	result := make(map[string]*kilov1alpha1.Peer, len(all.Items))
+
 	for i := range all.Items {
 		p := &all.Items[i]
-		// First one wins (alphabetically lowest name becomes canonical).
-		if existing, seen := result[p.Spec.PublicKey]; !seen || p.Name < existing.Name {
+
+		// Alphabetically lowest name becomes the canonical Peer for this publicKey.
+		existing, seen := result[p.Spec.PublicKey]
+		if !seen || p.Name < existing.Name {
 			result[p.Spec.PublicKey] = p
 		}
 	}
@@ -276,17 +314,21 @@ func buildAllPeersByPublicKey(ctx context.Context, remoteClient client.Client) (
 // duplicates removed.
 func mergeAllowedIPs(a, b []string) []string {
 	seen := make(map[string]struct{}, len(a)+len(b))
+
 	for _, ip := range a {
 		seen[ip] = struct{}{}
 	}
+
 	for _, ip := range b {
 		seen[ip] = struct{}{}
 	}
 
 	merged := make([]string, 0, len(seen))
+
 	for ip := range seen {
 		merged = append(merged, ip)
 	}
+
 	sort.Strings(merged)
 
 	return merged
