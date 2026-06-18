@@ -30,6 +30,14 @@ import (
 
 // ReconcilePeers ensures the remote cluster has exactly the desired set of Peers
 // for the given mesh and source cluster. It creates, updates, and deletes as needed.
+//
+// WireGuard identifies peers exclusively by public key — having two Peer CRDs with
+// the same publicKey causes the second write to silently overwrite the first's
+// AllowedIPs with an empty set, breaking routing. This function prevents that by
+// checking the global peer list before creating new Peer CRDs: if a Peer with the
+// same publicKey already exists under a different name (created by a prior reconcile
+// for another mesh), the desired AllowedIPs are merged into that existing Peer
+// instead of creating a duplicate.
 func ReconcilePeers(
 	ctx context.Context,
 	remoteClient client.Client,
@@ -37,10 +45,17 @@ func ReconcilePeers(
 	sourceCluster string,
 	desired []*kilov1alpha1.Peer,
 ) error {
+	// Build a global map of all peers by publicKey so we can detect cross-mesh
+	// duplicates before creating new ones.
+	allByPubKey, err := buildAllPeersByPublicKey(ctx, remoteClient)
+	if err != nil {
+		return errors.Wrap(err, "listing all peers for publicKey deduplication")
+	}
+
 	existing := &kilov1alpha1.PeerList{}
 	selector := OrphanSelector(meshName, sourceCluster)
 
-	err := remoteClient.List(ctx, existing, client.MatchingLabelsSelector{Selector: selector})
+	err = remoteClient.List(ctx, existing, client.MatchingLabelsSelector{Selector: selector})
 	if err != nil {
 		return errors.Wrap(err, "listing existing peers")
 	}
@@ -50,7 +65,7 @@ func ReconcilePeers(
 
 	errs := make([]error, 0, len(desiredByName)+len(existingByName))
 
-	errs = append(errs, reconcileDesired(ctx, remoteClient, desiredByName, existingByName)...)
+	errs = append(errs, reconcileDesired(ctx, remoteClient, desiredByName, existingByName, allByPubKey)...)
 	errs = append(errs, deleteOrphans(ctx, remoteClient, desiredByName, existingByName)...)
 
 	return errors.Join(errs...)
@@ -113,31 +128,81 @@ func reconcileDesired(
 	remoteClient client.Client,
 	desiredByName map[string]*kilov1alpha1.Peer,
 	existingByName map[string]*kilov1alpha1.Peer,
+	allByPubKey map[string]*kilov1alpha1.Peer,
 ) []error {
 	var errs []error
 
 	for name, desiredPeer := range desiredByName {
 		existingPeer, exists := existingByName[name]
+
 		if !exists {
-			err := remoteClient.Create(ctx, desiredPeer.DeepCopy())
-			if err != nil {
-				errs = append(errs, errors.Wrapf(err, "creating peer %s", name))
-			}
+			errs = append(errs, createOrMerge(ctx, remoteClient, name, desiredPeer, allByPubKey)...)
 
 			continue
 		}
 
-		if !peerSpecEqual(existingPeer.Spec, desiredPeer.Spec) {
-			existingPeer.Spec = desiredPeer.Spec
+		if peerSpecEqual(existingPeer.Spec, desiredPeer.Spec) {
+			continue
+		}
 
-			err := remoteClient.Update(ctx, existingPeer)
-			if err != nil {
-				errs = append(errs, errors.Wrapf(err, "updating peer %s", name))
-			}
+		existingPeer.Spec = desiredPeer.Spec
+
+		err := remoteClient.Update(ctx, existingPeer)
+		if err != nil {
+			errs = append(errs, errors.Wrapf(err, "updating peer %s", name))
 		}
 	}
 
 	return errs
+}
+
+// createOrMerge either creates a new Peer or, when a Peer with the same
+// publicKey already exists under a different name, merges the desired
+// AllowedIPs into that canonical Peer. This prevents WireGuard from seeing
+// two peers with identical public keys, which would silently clear the
+// AllowedIPs of the first entry.
+func createOrMerge(
+	ctx context.Context,
+	remoteClient client.Client,
+	name string,
+	desiredPeer *kilov1alpha1.Peer,
+	allByPubKey map[string]*kilov1alpha1.Peer,
+) []error {
+	canonical, hasDup := allByPubKey[desiredPeer.Spec.PublicKey]
+	if hasDup && canonical.Name != name {
+		return mergeIntoCanonical(ctx, remoteClient, canonical, desiredPeer.Spec.AllowedIPs, name)
+	}
+
+	err := remoteClient.Create(ctx, desiredPeer.DeepCopy())
+	if err != nil {
+		return []error{errors.Wrapf(err, "creating peer %s", name)}
+	}
+
+	return nil
+}
+
+// mergeIntoCanonical merges newIPs into an existing canonical Peer's AllowedIPs.
+func mergeIntoCanonical(
+	ctx context.Context,
+	remoteClient client.Client,
+	canonical *kilov1alpha1.Peer,
+	newIPs []string,
+	collidingName string,
+) []error {
+	merged := mergeAllowedIPs(canonical.Spec.AllowedIPs, newIPs)
+	if allowedIPsEqual(merged, canonical.Spec.AllowedIPs) {
+		return nil
+	}
+
+	updated := canonical.DeepCopy()
+	updated.Spec.AllowedIPs = merged
+
+	err := remoteClient.Update(ctx, updated)
+	if err != nil {
+		return []error{errors.Wrapf(err, "merging AllowedIPs into canonical peer %s (publicKey collision with %s)", canonical.Name, collidingName)}
+	}
+
+	return nil
 }
 
 func deleteOrphans(
@@ -217,4 +282,54 @@ func allowedIPsEqual(ipsA, ipsB []string) bool {
 	sort.Strings(sortedB)
 
 	return reflect.DeepEqual(sortedA, sortedB)
+}
+
+// buildAllPeersByPublicKey returns a map of publicKey → Peer covering every Peer
+// object in the cluster, regardless of labels. Used to detect cross-mesh publicKey
+// collisions before creating new Peer CRDs.
+func buildAllPeersByPublicKey(ctx context.Context, remoteClient client.Client) (map[string]*kilov1alpha1.Peer, error) {
+	all := &kilov1alpha1.PeerList{}
+
+	err := remoteClient.List(ctx, all)
+	if err != nil {
+		return nil, errors.Wrap(err, "listing all peers")
+	}
+
+	result := make(map[string]*kilov1alpha1.Peer, len(all.Items))
+
+	for i := range all.Items {
+		p := &all.Items[i]
+
+		// Alphabetically lowest name becomes the canonical Peer for this publicKey.
+		existing, seen := result[p.Spec.PublicKey]
+		if !seen || p.Name < existing.Name {
+			result[p.Spec.PublicKey] = p
+		}
+	}
+
+	return result, nil
+}
+
+// mergeAllowedIPs returns the union of two AllowedIPs slices, sorted, with
+// duplicates removed.
+func mergeAllowedIPs(a, b []string) []string {
+	seen := make(map[string]struct{}, len(a)+len(b))
+
+	for _, ip := range a {
+		seen[ip] = struct{}{}
+	}
+
+	for _, ip := range b {
+		seen[ip] = struct{}{}
+	}
+
+	merged := make([]string, 0, len(seen))
+
+	for ip := range seen {
+		merged = append(merged, ip)
+	}
+
+	sort.Strings(merged)
+
+	return merged
 }

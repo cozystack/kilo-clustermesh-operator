@@ -268,6 +268,112 @@ func TestDeleteStaleSourceClusters_IgnoresOtherMeshes(t *testing.T) {
 	assert.Equal(t, "theirs", otherMesh[0].Name)
 }
 
+// TestReconcilePeers_SamePublicKeyMergesInsteadOfCreatingDuplicate reproduces
+// the bug where mesh1 and mesh2 both push peers from the same ceph node
+// (identical publicKey) to the workload cluster. The second reconcile must not
+// create a second Peer CRD — instead it merges AllowedIPs into the first one.
+func TestReconcilePeers_SamePublicKeyMergesInsteadOfCreatingDuplicate(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	fc := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+
+	sharedKey := "shared-wg-pubkey"
+
+	// mesh1 reconcile: creates mesh1--ceph--cephstg01.
+	mesh1Peer := makePeer("mesh1--ceph--cephstg01", []string{"10.247.0.0/24", "100.66.0.1/32"}, sharedKey)
+	err := peer.ReconcilePeers(ctx, fc, "mesh1", "ceph", []*kilov1alpha1.Peer{mesh1Peer})
+	require.NoError(t, err)
+
+	items := listPeers(t, ctx, fc)
+	require.Len(t, items, 1, "mesh1 reconcile should create exactly one peer")
+
+	// mesh2 reconcile (different labels): same publicKey, overlapping AllowedIPs.
+	mesh2Peer := makePeerWithLabels("mesh2--ceph--cephstg01", []string{"10.247.0.0/24", "100.66.0.1/32", "10.99.0.0/16"}, sharedKey, "mesh2", "ceph")
+	err = peer.ReconcilePeers(ctx, fc, "mesh2", "ceph", []*kilov1alpha1.Peer{mesh2Peer})
+	require.NoError(t, err)
+
+	// Must still have exactly one Peer — no duplicate created.
+	allPeers := &kilov1alpha1.PeerList{}
+	require.NoError(t, fc.List(ctx, allPeers))
+	require.Len(t, allPeers.Items, 1, "second reconcile with same publicKey must not create a duplicate")
+
+	canonical := allPeers.Items[0]
+	assert.Equal(t, sharedKey, canonical.Spec.PublicKey)
+	assert.ElementsMatch(t,
+		[]string{"10.247.0.0/24", "100.66.0.1/32", "10.99.0.0/16"},
+		canonical.Spec.AllowedIPs,
+		"AllowedIPs from both reconciles must be merged into the canonical peer",
+	)
+}
+
+// TestReconcilePeers_SamePublicKeyWithDifferentAllowedIPs verifies that when
+// two reconciles contribute non-overlapping AllowedIPs for the same publicKey,
+// the canonical peer ends up with the union of both sets.
+func TestReconcilePeers_SamePublicKeyWithDifferentAllowedIPs(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	fc := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+
+	sharedKey := "another-wg-pubkey"
+
+	peerA := makePeer("mesh-a--ext--node1", []string{"10.1.0.0/24"}, sharedKey)
+	err := peer.ReconcilePeers(ctx, fc, "mesh-a", "ext", []*kilov1alpha1.Peer{peerA})
+	require.NoError(t, err)
+
+	peerB := makePeerWithLabels("mesh-b--ext--node1", []string{"10.2.0.0/24"}, sharedKey, "mesh-b", "ext")
+	err = peer.ReconcilePeers(ctx, fc, "mesh-b", "ext", []*kilov1alpha1.Peer{peerB})
+	require.NoError(t, err)
+
+	all := &kilov1alpha1.PeerList{}
+	require.NoError(t, fc.List(ctx, all))
+	require.Len(t, all.Items, 1)
+	assert.ElementsMatch(t, []string{"10.1.0.0/24", "10.2.0.0/24"}, all.Items[0].Spec.AllowedIPs)
+}
+
+// TestReconcilePeers_UniquePublicKeysAreNotMerged is a regression guard to
+// ensure that peers with different publicKeys are never accidentally merged.
+func TestReconcilePeers_UniquePublicKeysAreNotMerged(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	fc := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+
+	desired := []*kilov1alpha1.Peer{
+		makePeer("peer-alpha", []string{"10.0.0.1/32"}, "pubkey-alpha"),
+		makePeer("peer-beta", []string{"10.0.0.2/32"}, "pubkey-beta"),
+	}
+
+	err := peer.ReconcilePeers(ctx, fc, reconcilerTestMesh, reconcilerTestCluster, desired)
+	require.NoError(t, err)
+
+	items := listPeers(t, ctx, fc)
+	require.Len(t, items, 2)
+
+	byName := make(map[string]kilov1alpha1.Peer, len(items))
+	for _, item := range items {
+		byName[item.Name] = item
+	}
+	assert.Contains(t, byName, "peer-alpha")
+	assert.Contains(t, byName, "peer-beta")
+}
+
+// makePeerWithLabels is like makePeer but with explicit mesh/source-cluster labels,
+// used to simulate peers created under a different (mesh, source-cluster) pair.
+func makePeerWithLabels(name string, allowedIPs []string, publicKey, meshName, sourceCluster string) *kilov1alpha1.Peer {
+	return &kilov1alpha1.Peer{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   name,
+			Labels: peer.Labels(meshName, sourceCluster),
+		},
+		Spec: kilov1alpha1.PeerSpec{
+			AllowedIPs: allowedIPs,
+			PublicKey:  publicKey,
+		},
+	}
+}
+
 func TestReconcilePeers_MixedCreateUpdateDelete(t *testing.T) {
 	t.Parallel()
 
