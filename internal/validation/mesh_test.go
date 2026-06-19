@@ -32,14 +32,23 @@ import (
 	"github.com/squat/kilo-clustermesh-operator/internal/validation"
 )
 
-// makeCluster is a helper that constructs a ClusterEntry with the given fields.
+// makeCluster is a helper that constructs a ClusterEntry, folding the pod,
+// wireguard, service and any additional CIDRs into the flat AllowedNetworks
+// list. Empty CIDR strings are dropped so that the legacy `serviceCIDR == ""`
+// call sites continue to express "no service CIDR" rather than injecting an
+// unparseable empty entry.
 func makeCluster(name, podCIDR, wireguardCIDR, serviceCIDR string, additionalCIDRs ...string) v1alpha1.ClusterEntry {
+	networks := make([]string, 0, 3+len(additionalCIDRs))
+
+	for _, cidr := range append([]string{podCIDR, wireguardCIDR, serviceCIDR}, additionalCIDRs...) {
+		if cidr != "" {
+			networks = append(networks, cidr)
+		}
+	}
+
 	return v1alpha1.ClusterEntry{
 		Name:            name,
-		PodCIDRs:        []string{podCIDR},
-		WireguardCIDR:   wireguardCIDR,
-		ServiceCIDR:     serviceCIDR,
-		AdditionalCIDRs: additionalCIDRs,
+		AllowedNetworks: networks,
 	}
 }
 
@@ -101,9 +110,8 @@ func TestValidateClusterNetworks(t *testing.T) {
 			name: "invalid CIDR string",
 			clusters: []v1alpha1.ClusterEntry{
 				{
-					Name:          "cluster-a",
-					PodCIDRs:      []string{"not-a-cidr"},
-					WireguardCIDR: "10.4.0.0/24",
+					Name:            "cluster-a",
+					AllowedNetworks: []string{"not-a-cidr", "10.4.0.0/24"},
 				},
 			},
 			wantErr:     true,
@@ -123,10 +131,7 @@ func TestValidateClusterNetworks(t *testing.T) {
 			clusters: []v1alpha1.ClusterEntry{
 				{
 					Name:            "cluster-a",
-					PodCIDRs:        []string{"10.0.0.0/16"},
-					WireguardCIDR:   "10.4.0.0/24",
-					ServiceCIDR:     "10.96.0.0/12",
-					AdditionalCIDRs: []string{"172.16.0.0/12"},
+					AllowedNetworks: []string{"10.0.0.0/16", "10.4.0.0/24", "10.96.0.0/12", "172.16.0.0/12"},
 				},
 			},
 			wantErr: false,

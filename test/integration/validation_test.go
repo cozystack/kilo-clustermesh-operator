@@ -50,15 +50,13 @@ func TestOverlappingNetworks_NoPeersCreated(t *testing.T) {
 		Spec: v1alpha1.ClusterMeshSpec{
 			Clusters: []v1alpha1.ClusterEntry{
 				{
-					Name:          "local-a",
-					Local:         true,
-					PodCIDRs:      []string{"10.0.0.0/16"},
-					WireguardCIDR: "10.100.0.0/24",
+					Name:            "local-a",
+					Local:           true,
+					AllowedNetworks: []string{"10.0.0.0/16", "10.100.0.0/24"},
 				},
 				{
-					Name:          "remote-a",
-					PodCIDRs:      []string{"10.3.0.0/16"},
-					WireguardCIDR: "10.100.1.0/24",
+					Name:            "remote-a",
+					AllowedNetworks: []string{"10.3.0.0/16", "10.100.1.0/24"},
 				},
 			},
 		},
@@ -72,15 +70,13 @@ func TestOverlappingNetworks_NoPeersCreated(t *testing.T) {
 		Spec: v1alpha1.ClusterMeshSpec{
 			Clusters: []v1alpha1.ClusterEntry{
 				{
-					Name:          "local-b",
-					Local:         true,
-					PodCIDRs:      []string{"10.0.0.0/16"}, // same — overlaps with meshA's different cluster
-					WireguardCIDR: "10.100.2.0/24",
+					Name:            "local-b",
+					Local:           true,
+					AllowedNetworks: []string{"10.0.0.0/16", "10.100.2.0/24"},
 				},
 				{
-					Name:          "remote-b",
-					PodCIDRs:      []string{"10.4.0.0/16"},
-					WireguardCIDR: "10.100.3.0/24",
+					Name:            "remote-b",
+					AllowedNetworks: []string{"10.4.0.0/16", "10.100.3.0/24"},
 				},
 			},
 		},
@@ -121,9 +117,9 @@ func TestOverlappingNetworks_NoPeersCreated(t *testing.T) {
 }
 
 // TestInvalidNodeWGIP_NodeSkipped verifies that a node whose WireGuard IP is
-// outside the cluster's WireguardCIDR is skipped: only 1 Peer is created in the
-// remote cluster (for the valid node), and the local cluster status shows
-// skippedNodes=1.
+// outside every entry of the cluster's AllowedNetworks is skipped: only 1 Peer
+// is created in the remote cluster (for the valid node), and the local cluster
+// status shows skippedNodes=1.
 func TestInvalidNodeWGIP_NodeSkipped(t *testing.T) {
 	ctx := context.Background()
 

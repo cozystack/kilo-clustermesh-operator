@@ -46,17 +46,17 @@ type ClusterEntry struct {
 	// +optional
 	KubeconfigSecretRef *SecretKeyRef `json:"kubeconfigSecretRef,omitempty"`
 
-	// PodCIDRs is the list of pod network CIDRs for this cluster.
-	// Node.Spec.PodCIDRs must be a subset of these CIDRs.
+	// AllowedNetworks is the flat list of every CIDR this cluster contributes
+	// to the mesh: pod CIDRs, the WireGuard (kilo0) CIDR, the service CIDR,
+	// host-network ranges, external subnets, and so on. There is no typed
+	// distinction between them — both validation and Peer construction treat
+	// every entry uniformly. A node is eligible when its PodCIDR is a subset
+	// of some entry and its kilo.squat.ai/wireguard-ip host IP falls within
+	// some entry; entries that have no per-node representative (e.g. the
+	// service CIDR or host-network ranges) are advertised via the anchor Peer.
 	// Multiple entries support dual-stack (IPv4 + IPv6).
 	// +kubebuilder:validation:MinItems=1
-	PodCIDRs []string `json:"podCIDRs"` //nolint:tagliatelle // "podCIDRs" is the canonical field name; "CIDR" is a well-known acronym
-
-	// WireguardCIDR is the CIDR for Kilo's WireGuard interface (kilo0) addresses.
-	// Each node's kilo.squat.ai/wireguard-ip must have its host IP within this CIDR.
-	// The annotation may carry any prefix length (e.g. "10.4.0.1/32" upstream Kilo
-	// or "10.4.0.1/16" cozystack-patched Kilo); only the host portion is validated.
-	WireguardCIDR string `json:"wireguardCIDR"`
+	AllowedNetworks []string `json:"allowedNetworks"`
 
 	// WireguardPort is the UDP port of Kilo's WireGuard endpoint on each node in
 	// this cluster. Used as a fallback when the operator synthesises the
@@ -68,17 +68,6 @@ type ClusterEntry struct {
 	// +kubebuilder:default=51820
 	// +optional
 	WireguardPort uint16 `json:"wireguardPort,omitempty"`
-
-	// ServiceCIDR is the Kubernetes service network CIDR for this cluster.
-	// If set, it will be advertised via an anchor Peer so that services
-	// in this cluster are reachable from other mesh members.
-	// +optional
-	ServiceCIDR string `json:"serviceCIDR,omitempty"`
-
-	// AdditionalCIDRs are extra CIDRs to advertise into the mesh
-	// (e.g., host-network ranges, external subnets).
-	// +optional
-	AdditionalCIDRs []string `json:"additionalCIDRs,omitempty"` //nolint:tagliatelle // "additionalCIDRs" is the canonical field name; "CIDR" is a well-known acronym
 
 	// PersistentKeepalive is the interval in seconds at which WireGuard
 	// sends keepalive packets to peers in this cluster. Set to a non-zero
@@ -92,21 +81,11 @@ type ClusterEntry struct {
 	PersistentKeepalive int `json:"persistentKeepalive,omitempty"`
 }
 
-// AllCIDRs returns the union of all CIDRs declared by this cluster entry.
-// The order is: podCIDRs, wireguardCIDR, serviceCIDR (if set), additionalCIDRs.
+// AllCIDRs returns every CIDR declared by this cluster entry. With the flat
+// model this is simply the AllowedNetworks list; it is consumed by the
+// cross-mesh overlap validation, whose behaviour is unchanged.
 func (c *ClusterEntry) AllCIDRs() []string {
-	cidrs := make([]string, 0, len(c.PodCIDRs)+1+1+len(c.AdditionalCIDRs))
-	cidrs = append(cidrs, c.PodCIDRs...)
-
-	cidrs = append(cidrs, c.WireguardCIDR)
-
-	if c.ServiceCIDR != "" {
-		cidrs = append(cidrs, c.ServiceCIDR)
-	}
-
-	cidrs = append(cidrs, c.AdditionalCIDRs...)
-
-	return cidrs
+	return c.AllowedNetworks
 }
 
 // SecretKeyRef identifies a key within a Kubernetes Secret.

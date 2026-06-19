@@ -227,15 +227,16 @@ func TestBuildPeer_AnchorExtras_WithServiceCIDR(t *testing.T) {
 	// Replaces the legacy TestBuildAnchorPeer_WithServiceCIDR. The anchor
 	// CIDRs now fold into the first node's Peer via extraAllowedIPs, so a
 	// single WireGuard peer entry on the receiving side carries both the
-	// node-local routes and the cluster-wide routes.
+	// node-local routes and the cluster-wide routes. The service CIDR has no
+	// per-node representative, so CollectAnchorCIDRs keeps it as a residual.
 	entry := &v1alpha1.ClusterEntry{
-		Name:        "cluster-a",
-		ServiceCIDR: "10.96.0.0/12",
+		Name:            "cluster-a",
+		AllowedNetworks: []string{"10.96.0.0/12"},
 	}
 
 	node := testNode("worker-1", testPodCIDR, baseAnnotations())
 
-	got, err := peer.BuildPeer("my-mesh", entry, node, peer.CollectAnchorCIDRs(entry))
+	got, err := peer.BuildPeer("my-mesh", entry, node, peer.CollectAnchorCIDRs(entry, []*corev1.Node{node}))
 
 	require.NoError(t, err)
 	require.NotNil(t, got)
@@ -249,17 +250,17 @@ func TestBuildPeer_AnchorExtras_WithServiceCIDR(t *testing.T) {
 func TestBuildPeer_AnchorExtras_WithAdditionalCIDRs(t *testing.T) {
 	t.Parallel()
 
-	// AdditionalCIDRs append after serviceCIDR in CollectAnchorCIDRs and
-	// must appear after the node's own routes in the merged AllowedIPs.
+	// Residual anchor CIDRs preserve their order in AllowedNetworks and must
+	// appear after the node's own routes in the merged AllowedIPs. None of
+	// these have a per-node representative, so all survive into the anchor.
 	entry := &v1alpha1.ClusterEntry{
 		Name:            "cluster-a",
-		ServiceCIDR:     "10.96.0.0/12",
-		AdditionalCIDRs: []string{"192.168.100.0/24", "172.16.0.0/16"},
+		AllowedNetworks: []string{"10.96.0.0/12", "192.168.100.0/24", "172.16.0.0/16"},
 	}
 
 	node := testNode("worker-1", testPodCIDR, baseAnnotations())
 
-	got, err := peer.BuildPeer("my-mesh", entry, node, peer.CollectAnchorCIDRs(entry))
+	got, err := peer.BuildPeer("my-mesh", entry, node, peer.CollectAnchorCIDRs(entry, []*corev1.Node{node}))
 
 	require.NoError(t, err)
 	require.NotNil(t, got)
@@ -274,18 +275,18 @@ func TestBuildPeer_AnchorExtras_WithAdditionalCIDRs(t *testing.T) {
 func TestBuildPeer_NoExtras_ProducesNodeOnlyAllowedIPs(t *testing.T) {
 	t.Parallel()
 
-	// Replaces TestBuildAnchorPeer_NoAnchorCIDRs: when the caller passes
-	// no extras (non-anchor node, or anchor cluster has no serviceCIDR /
-	// additionalCIDRs), the AllowedIPs list is just the node's own routes.
+	// Replaces TestBuildAnchorPeer_NoAnchorCIDRs: when every AllowedNetworks
+	// entry already has a per-node representative (the pod aggregate covers
+	// the node's PodCIDR, the WG CIDR covers its wireguard-ip), CollectAnchorCIDRs
+	// returns no residual, so the AllowedIPs list is just the node's own routes.
 	entry := &v1alpha1.ClusterEntry{
 		Name:            "cluster-a",
-		ServiceCIDR:     "",
-		AdditionalCIDRs: nil,
+		AllowedNetworks: []string{"10.244.0.0/16", "10.4.0.0/24"},
 	}
 
 	node := testNode("worker-1", testPodCIDR, baseAnnotations())
 
-	got, err := peer.BuildPeer("my-mesh", entry, node, peer.CollectAnchorCIDRs(entry))
+	got, err := peer.BuildPeer("my-mesh", entry, node, peer.CollectAnchorCIDRs(entry, []*corev1.Node{node}))
 
 	require.NoError(t, err)
 	require.NotNil(t, got)
@@ -384,8 +385,8 @@ func TestBuildPeer_AnchorExtras_NoEndpointSource_ReturnsError(t *testing.T) {
 	// strictly stricter: the operator surfaces misconfiguration instead
 	// of silently dropping cluster-wide CIDRs.
 	entry := &v1alpha1.ClusterEntry{
-		Name:        "cluster-a",
-		ServiceCIDR: "10.96.0.0/12",
+		Name:            "cluster-a",
+		AllowedNetworks: []string{"10.96.0.0/12"},
 	}
 
 	annotations := baseAnnotations()
@@ -394,7 +395,7 @@ func TestBuildPeer_AnchorExtras_NoEndpointSource_ReturnsError(t *testing.T) {
 	node := testNode("worker-1", testPodCIDR, annotations)
 	node.Status.Addresses = nil
 
-	got, err := peer.BuildPeer("my-mesh", entry, node, peer.CollectAnchorCIDRs(entry))
+	got, err := peer.BuildPeer("my-mesh", entry, node, peer.CollectAnchorCIDRs(entry, []*corev1.Node{node}))
 
 	require.Error(t, err)
 	assert.Nil(t, got, "node Peer without resolvable endpoint must error, regardless of anchor CIDRs")
@@ -408,9 +409,9 @@ func TestBuildPeer_AnchorExtras_ExternalIPFallback(t *testing.T) {
 	// is the same for anchor vs non-anchor nodes — there is no separate
 	// path anymore.
 	entry := &v1alpha1.ClusterEntry{
-		Name:          "cluster-a",
-		ServiceCIDR:   "10.96.0.0/12",
-		WireguardPort: 51820,
+		Name:            "cluster-a",
+		AllowedNetworks: []string{"10.96.0.0/12"},
+		WireguardPort:   51820,
 	}
 
 	annotations := baseAnnotations()
@@ -421,7 +422,7 @@ func TestBuildPeer_AnchorExtras_ExternalIPFallback(t *testing.T) {
 		{Type: corev1.NodeExternalIP, Address: "203.0.113.99"},
 	}
 
-	got, err := peer.BuildPeer("my-mesh", entry, node, peer.CollectAnchorCIDRs(entry))
+	got, err := peer.BuildPeer("my-mesh", entry, node, peer.CollectAnchorCIDRs(entry, []*corev1.Node{node}))
 
 	require.NoError(t, err)
 	require.NotNil(t, got)
@@ -451,4 +452,95 @@ func TestBuildPeer_BracketedDNSEndpoint(t *testing.T) {
 	assert.Equal(t, "dns.example.com", got.Spec.Endpoint.DNS,
 		"brackets must be stripped from the DNS field; got %q", got.Spec.Endpoint.DNS)
 	assert.Empty(t, got.Spec.Endpoint.IP)
+}
+
+// TestCollectAnchorCIDRs exercises the node-aware residual logic: an
+// AllowedNetworks entry survives into the anchor only when no node already
+// advertises it (no per-node PodCIDR subset, no contained wireguard-ip).
+func TestCollectAnchorCIDRs(t *testing.T) {
+	t.Parallel()
+
+	// A node carrying pod CIDR 10.244.1.0/24 and WireGuard IP 10.4.0.1/32.
+	// It covers the pod aggregate 10.244.0.0/16 and the WG CIDR 10.4.0.0/24.
+	coveringNode := testNode("worker-1", "10.244.1.0/24", map[string]string{
+		kilonode.AnnotationWireguardIP: "10.4.0.1/32",
+		kilonode.AnnotationPublicKey:   testPubKey,
+	})
+
+	tests := []struct {
+		name  string
+		entry *v1alpha1.ClusterEntry
+		nodes []*corev1.Node
+		want  []string
+	}{
+		{
+			// Service CIDR has no per-node representative → stays in anchor.
+			name: "service CIDR with no per-node representative goes to anchor",
+			entry: &v1alpha1.ClusterEntry{
+				Name:            "cluster-a",
+				AllowedNetworks: []string{"10.96.0.0/12"},
+			},
+			nodes: []*corev1.Node{coveringNode},
+			want:  []string{"10.96.0.0/12"},
+		},
+		{
+			// Pod aggregate is covered by the node's PodCIDR → omitted.
+			name: "pod aggregate covered by node PodCIDR is not in anchor",
+			entry: &v1alpha1.ClusterEntry{
+				Name:            "cluster-a",
+				AllowedNetworks: []string{"10.244.0.0/16"},
+			},
+			nodes: []*corev1.Node{coveringNode},
+			want:  nil,
+		},
+		{
+			// Host-network range has no per-node representative → stays in anchor.
+			name: "host-network range with no per-node representative goes to anchor",
+			entry: &v1alpha1.ClusterEntry{
+				Name:            "cluster-a",
+				AllowedNetworks: []string{"192.168.103.0/24"},
+			},
+			nodes: []*corev1.Node{coveringNode},
+			want:  []string{"192.168.103.0/24"},
+		},
+		{
+			// WG CIDR is covered by the node's wireguard-ip host IP → omitted.
+			name: "wireguard CIDR covered by node wireguard-ip is not in anchor",
+			entry: &v1alpha1.ClusterEntry{
+				Name:            "cluster-a",
+				AllowedNetworks: []string{"10.4.0.0/24"},
+			},
+			nodes: []*corev1.Node{coveringNode},
+			want:  nil,
+		},
+		{
+			// Mixed list: only the residual (uncovered) entries survive, in order.
+			name: "mixed list keeps only uncovered entries in declared order",
+			entry: &v1alpha1.ClusterEntry{
+				Name:            "cluster-a",
+				AllowedNetworks: []string{"10.244.0.0/16", "10.96.0.0/12", "10.4.0.0/24", "192.168.103.0/24"},
+			},
+			nodes: []*corev1.Node{coveringNode},
+			want:  []string{"10.96.0.0/12", "192.168.103.0/24"},
+		},
+		{
+			// With no nodes at all, nothing is covered → every entry is residual.
+			name: "no nodes means every entry is residual",
+			entry: &v1alpha1.ClusterEntry{
+				Name:            "cluster-a",
+				AllowedNetworks: []string{"10.244.0.0/16", "10.4.0.0/24"},
+			},
+			nodes: nil,
+			want:  []string{"10.244.0.0/16", "10.4.0.0/24"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := peer.CollectAnchorCIDRs(tc.entry, tc.nodes)
+			assert.Equal(t, tc.want, got)
+		})
+	}
 }

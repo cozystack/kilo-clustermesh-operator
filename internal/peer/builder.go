@@ -36,9 +36,10 @@ import (
 // The Peer's AllowedIPs always include the node's PodCIDR plus a /32 (or
 // /128) host route derived from its kilo.squat.ai/wireguard-ip annotation.
 //
-// extraAllowedIPs lets the caller fold cluster-wide CIDRs (serviceCIDR and
-// any AdditionalCIDRs declared on the ClusterEntry) into the first valid
-// node's Peer. This replaces the old "anchor Peer" pattern, which emitted
+// extraAllowedIPs lets the caller fold cluster-wide CIDRs (the entries of
+// AllowedNetworks that no individual node represents, e.g. the service CIDR
+// or host-network ranges) into the first valid node's Peer. This replaces
+// the old "anchor Peer" pattern, which emitted
 // a SEPARATE Peer object reusing the anchor node's public key. WireGuard
 // identifies peers exclusively by their public key and keeps only one
 // peer entry per pubkey: the second `wg setconf` call either dropped the
@@ -102,22 +103,82 @@ func BuildPeer(meshName string, entry *v1alpha1.ClusterEntry, node *corev1.Node,
 	return peer, nil
 }
 
-// CollectAnchorCIDRs returns the cluster-wide CIDRs (serviceCIDR plus any
-// AdditionalCIDRs) declared on a ClusterEntry. The caller is expected to
-// pass these as extraAllowedIPs to BuildPeer for a single (anchor) node —
-// see the commentary on BuildPeer for the WireGuard pubkey-dedup
-// rationale that motivates folding cluster-wide CIDRs into a node Peer
-// rather than emitting a separate anchor Peer.
-func CollectAnchorCIDRs(entry *v1alpha1.ClusterEntry) []string {
-	var cidrs []string
+// CollectAnchorCIDRs returns the residual entries of entry.AllowedNetworks
+// that no individual node already advertises via its own Peer — i.e. the
+// cluster-wide CIDRs (service CIDR, host-network ranges, external subnets)
+// that have no per-node representative. These are folded as extraAllowedIPs
+// into a single (anchor) node's Peer; see the commentary on BuildPeer for the
+// WireGuard pubkey-dedup rationale that motivates folding cluster-wide CIDRs
+// into a node Peer rather than emitting a separate anchor Peer.
+//
+// An AllowedNetworks entry N is considered "covered" — and therefore omitted
+// from the anchor — when some node already carries it: either node N's first
+// PodCIDR is a subset of N (the pod aggregate is announced by the per-node
+// Peer's PodCIDR), or the host IP of node N's kilo.squat.ai/wireguard-ip
+// annotation falls within N (the WG CIDR is announced by the per-node /32 or
+// /128 host route). Nodes with a missing or unparseable PodCIDR / wireguard-ip
+// simply do not cover anything; they are ignored here (validateNode already
+// gates them out of the peered set).
+func CollectAnchorCIDRs(entry *v1alpha1.ClusterEntry, nodes []*corev1.Node) []string {
+	var residual []string
 
-	if entry.ServiceCIDR != "" {
-		cidrs = append(cidrs, entry.ServiceCIDR)
+	for _, networkStr := range entry.AllowedNetworks {
+		network, err := netutil.ParseCIDR(networkStr)
+		if err != nil {
+			// Keep unparseable entries verbatim: validation never trusted
+			// these for announcement either, and dropping them would
+			// silently discard operator intent.
+			residual = append(residual, networkStr)
+
+			continue
+		}
+
+		if !networkCoveredByAnyNode(network, nodes) {
+			residual = append(residual, networkStr)
+		}
 	}
 
-	cidrs = append(cidrs, entry.AdditionalCIDRs...)
+	return residual
+}
 
-	return cidrs
+// networkCoveredByAnyNode reports whether some node already advertises network
+// via its per-node Peer: either the node's first PodCIDR is a subset of
+// network, or the host IP of its kilo.squat.ai/wireguard-ip annotation falls
+// within network. Nodes with missing/invalid PodCIDR or wireguard-ip do not
+// cover anything.
+func networkCoveredByAnyNode(network *net.IPNet, nodes []*corev1.Node) bool {
+	for _, node := range nodes {
+		if nodeCoversNetwork(network, node) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// nodeCoversNetwork reports whether a single node already advertises network,
+// either through its first PodCIDR (subset of network) or through the host IP
+// of its kilo.squat.ai/wireguard-ip annotation (contained in network). A
+// missing or unparseable PodCIDR / wireguard-ip simply does not cover.
+func nodeCoversNetwork(network *net.IPNet, node *corev1.Node) bool {
+	if len(node.Spec.PodCIDRs) > 0 {
+		nodeCIDR, err := netutil.ParseCIDR(node.Spec.PodCIDRs[0])
+		if err == nil && netutil.CIDRContains(network, nodeCIDR) {
+			return true
+		}
+	}
+
+	wgIP := node.Annotations[kilonode.AnnotationWireguardIP]
+	if wgIP == "" {
+		return false
+	}
+
+	hostIP, _, err := netutil.ParseHostInCIDR(wgIP)
+	if err != nil {
+		return false
+	}
+
+	return network.Contains(hostIP)
 }
 
 // resolvePeerEndpoint resolves a node's WireGuard endpoint via the kilonode

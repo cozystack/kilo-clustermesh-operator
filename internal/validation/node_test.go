@@ -41,9 +41,8 @@ func makeNode(name string, podCIDRs []string, annotations map[string]string) *co
 }
 
 var baseEntry = &v1alpha1.ClusterEntry{
-	Name:          "test-cluster",
-	PodCIDRs:      []string{"10.0.0.0/16"},
-	WireguardCIDR: "10.4.0.0/24",
+	Name:            "test-cluster",
+	AllowedNetworks: []string{"10.0.0.0/16", "10.4.0.0/24"},
 }
 
 func baseAnnotations() map[string]string {
@@ -108,7 +107,7 @@ func TestValidateNode(t *testing.T) {
 			// prefix length other than /32 (or /128) via an IsHostRoute check. That
 			// check was intentionally dropped to support cozystack-patched Kilo, which
 			// writes the full subnet mask (e.g. "10.4.0.1/24") into the annotation.
-			// Only the host portion of the address is now validated against WireguardCIDR.
+			// Only the host portion of the address is now validated against AllowedNetworks.
 			name: "wireguard IP with subnet mask (cozystack-Kilo style)",
 			node: makeNode("node-1", []string{"10.0.1.0/24"}, map[string]string{
 				kilonode.AnnotationWireguardIP:   "10.4.0.1/24",
@@ -166,7 +165,7 @@ func TestValidateNode(t *testing.T) {
 			wantSkipped: false,
 		},
 		{
-			name: "wireguard IP outside wireguardCIDR",
+			name: "wireguard IP outside allowedNetworks",
 			node: makeNode("node-1", []string{"10.0.1.0/24"}, map[string]string{
 				kilonode.AnnotationWireguardIP: "10.5.0.1/32",
 				kilonode.AnnotationPublicKey:   "dGVzdGtleQo=",

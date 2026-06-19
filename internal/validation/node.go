@@ -81,10 +81,9 @@ func IsTransient(reason NodeSkipReason) bool {
 }
 
 // ValidateNode checks whether a node is eligible to be peered.
-// It validates the node's PodCIDR against the cluster's PodCIDRs,
-// the node's WireGuard IP against the cluster's WireguardCIDR, and
-// that the node exposes a resolvable WireGuard endpoint via the
-// kilonode fallback chain.
+// It validates the node's PodCIDR and WireGuard IP against the cluster's
+// AllowedNetworks (each must fall within some declared entry), and that the
+// node exposes a resolvable WireGuard endpoint via the kilonode fallback chain.
 // Returns (true, reason, message) if the node should be skipped, (false, "", "") if valid.
 func ValidateNode(node *corev1.Node, entry *v1alpha1.ClusterEntry) (bool, NodeSkipReason, string) {
 	if skip, reason, msg := validatePodCIDR(node, entry); skip {
@@ -116,7 +115,7 @@ func validatePodCIDR(node *corev1.Node, entry *v1alpha1.ClusterEntry) (bool, Nod
 		return true, ReasonNoPodCIDR, fmt.Sprintf("node %q has invalid PodCIDR %q: %v", node.Name, node.Spec.PodCIDRs[0], err)
 	}
 
-	for _, clusterCIDRStr := range entry.PodCIDRs {
+	for _, clusterCIDRStr := range entry.AllowedNetworks {
 		clusterCIDR, err := netutil.ParseCIDR(clusterCIDRStr)
 		if err != nil {
 			continue
@@ -128,8 +127,8 @@ func validatePodCIDR(node *corev1.Node, entry *v1alpha1.ClusterEntry) (bool, Nod
 	}
 
 	return true, ReasonPodCIDROutOfRange, fmt.Sprintf(
-		"node %q PodCIDR %q is not a subset of any cluster PodCIDR %v",
-		node.Name, node.Spec.PodCIDRs[0], entry.PodCIDRs,
+		"node %q PodCIDR %q is not a subset of any cluster AllowedNetworks %v",
+		node.Name, node.Spec.PodCIDRs[0], entry.AllowedNetworks,
 	)
 }
 
@@ -144,7 +143,7 @@ func validateWireguardIP(node *corev1.Node, entry *v1alpha1.ClusterEntry) (bool,
 	// The annotation may carry any prefix length. Upstream Kilo writes a /32
 	// host route ("10.4.0.1/32"); the cozystack-patched Kilo writes the host
 	// IP with the wireguard subnet mask ("100.66.0.3/16"). Both are accepted;
-	// only the host IP is checked against the cluster's wireguardCIDR.
+	// only the host IP is checked against the cluster's AllowedNetworks.
 	hostIP, _, err := netutil.ParseHostInCIDR(wgIP)
 	if err != nil {
 		return true, ReasonWGIPInvalid, fmt.Sprintf(
@@ -153,21 +152,21 @@ func validateWireguardIP(node *corev1.Node, entry *v1alpha1.ClusterEntry) (bool,
 		)
 	}
 
-	wgCIDR, err := netutil.ParseCIDR(entry.WireguardCIDR)
-	if err != nil {
-		return true, ReasonWGIPOutOfRange, fmt.Sprintf(
-			"cluster WireguardCIDR %q is invalid: %v", entry.WireguardCIDR, err,
-		)
+	for _, networkStr := range entry.AllowedNetworks {
+		network, parseErr := netutil.ParseCIDR(networkStr)
+		if parseErr != nil {
+			continue
+		}
+
+		if network.Contains(hostIP) {
+			return false, "", ""
+		}
 	}
 
-	if !wgCIDR.Contains(hostIP) {
-		return true, ReasonWGIPOutOfRange, fmt.Sprintf(
-			"node %q WireGuard IP %q is not within cluster WireguardCIDR %q",
-			node.Name, wgIP, entry.WireguardCIDR,
-		)
-	}
-
-	return false, "", ""
+	return true, ReasonWGIPOutOfRange, fmt.Sprintf(
+		"node %q WireGuard IP %q is not within any cluster AllowedNetworks %v",
+		node.Name, wgIP, entry.AllowedNetworks,
+	)
 }
 
 func validatePublicKey(node *corev1.Node) (bool, NodeSkipReason, string) {

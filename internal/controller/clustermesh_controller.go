@@ -795,18 +795,19 @@ func (r *ClusterMeshReconciler) updateStatus(ctx context.Context, mesh *v1alpha1
 }
 
 // buildDesiredPeers constructs the desired Peer slice for all valid nodes.
-// The first valid node carries the cluster-wide CIDRs (serviceCIDR and any
-// AdditionalCIDRs) folded into its Peer.AllowedIPs. The older design emitted
-// a separate anchor Peer that reused the anchor node's WireGuard public key;
-// WireGuard's per-pubkey dedup made the second `wg setconf` call to apply
-// either the node or the anchor entry clobber the AllowedIPs of the other,
-// silently losing pod-CIDR or service-CIDR routing in a racy way. Folding
-// the anchor CIDRs into the first node Peer keeps a single WG peer entry
-// per pubkey with the full union of AllowedIPs.
+// The first valid node carries the cluster-wide CIDRs from AllowedNetworks
+// that are not covered by any per-node value (e.g. the service CIDR or
+// host-network ranges) folded into its Peer.AllowedIPs. The older design
+// emitted a separate anchor Peer that reused the anchor node's WireGuard
+// public key; WireGuard's per-pubkey dedup made the second `wg setconf` call
+// to apply either the node or the anchor entry clobber the AllowedIPs of the
+// other, silently losing pod-CIDR or service-CIDR routing in a racy way.
+// Folding the anchor CIDRs into the first node Peer keeps a single WG peer
+// entry per pubkey with the full union of AllowedIPs.
 func buildDesiredPeers(meshName string, entry *v1alpha1.ClusterEntry, nodes []*corev1.Node) ([]*kilov1alpha1.Peer, error) {
 	peers := make([]*kilov1alpha1.Peer, 0, len(nodes))
 
-	anchorExtras := peer.CollectAnchorCIDRs(entry)
+	anchorExtras := peer.CollectAnchorCIDRs(entry, nodes)
 
 	for i, node := range nodes {
 		var extras []string

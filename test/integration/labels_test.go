@@ -75,15 +75,13 @@ func TestLabelIsolation_TwoMeshes(t *testing.T) {
 		Spec: v1alpha1.ClusterMeshSpec{
 			Clusters: []v1alpha1.ClusterEntry{
 				{
-					Name:          "local",
-					Local:         true,
-					PodCIDRs:      []string{"10.0.0.0/16"},
-					WireguardCIDR: "10.100.10.0/24",
+					Name:            "local",
+					Local:           true,
+					AllowedNetworks: []string{"10.0.0.0/16", "10.100.10.0/24"},
 				},
 				{
-					Name:          "remote",
-					PodCIDRs:      []string{"10.10.0.0/16"},
-					WireguardCIDR: "10.100.11.0/24",
+					Name:            "remote",
+					AllowedNetworks: []string{"10.10.0.0/16", "10.100.11.0/24"},
 				},
 			},
 		},
@@ -98,15 +96,13 @@ func TestLabelIsolation_TwoMeshes(t *testing.T) {
 		Spec: v1alpha1.ClusterMeshSpec{
 			Clusters: []v1alpha1.ClusterEntry{
 				{
-					Name:          "local",
-					Local:         true,
-					PodCIDRs:      []string{"10.20.0.0/16"},
-					WireguardCIDR: "10.100.20.0/24",
+					Name:            "local",
+					Local:           true,
+					AllowedNetworks: []string{"10.20.0.0/16", "10.100.20.0/24"},
 				},
 				{
-					Name:          "remote",
-					PodCIDRs:      []string{"10.30.0.0/16"},
-					WireguardCIDR: "10.100.21.0/24",
+					Name:            "remote",
+					AllowedNetworks: []string{"10.30.0.0/16", "10.100.21.0/24"},
 				},
 			},
 		},
