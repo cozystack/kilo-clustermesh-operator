@@ -92,9 +92,10 @@ func BuildPeer(meshName string, entry *v1alpha1.ClusterEntry, node *corev1.Node,
 			Labels: Labels(meshName, entry.Name),
 		},
 		Spec: kilov1alpha1.PeerSpec{
-			AllowedIPs: allowedIPs,
-			PublicKey:  pubKey,
-			Endpoint:   endpoint,
+			AllowedIPs:          allowedIPs,
+			PublicKey:           pubKey,
+			Endpoint:            endpoint,
+			PersistentKeepalive: entry.PersistentKeepalive,
 		},
 	}
 
