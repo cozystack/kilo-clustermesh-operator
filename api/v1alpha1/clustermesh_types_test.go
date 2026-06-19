@@ -57,17 +57,13 @@ func TestClusterMeshJSONRoundTrip(t *testing.T) {
 				{
 					Name:            "local-cluster",
 					Local:           true,
-					PodCIDRs:        []string{"10.0.0.0/16", "fd00::/48"},
-					WireguardCIDR:   "172.30.0.0/24",
+					AllowedNetworks: []string{"10.0.0.0/16", "fd00::/48", "172.30.0.0/24", "10.96.0.0/12", "192.168.100.0/24"},
 					WireguardPort:   51820,
-					ServiceCIDR:     "10.96.0.0/12",
-					AdditionalCIDRs: []string{"192.168.100.0/24"},
 				},
 				{
 					Name:                "remote-cluster",
 					KubeconfigSecretRef: secretRef,
-					PodCIDRs:            []string{"10.1.0.0/16"},
-					WireguardCIDR:       "172.30.1.0/24",
+					AllowedNetworks:     []string{"10.1.0.0/16", "172.30.1.0/24"},
 					WireguardPort:       52000,
 				},
 			},
@@ -119,9 +115,7 @@ func TestClusterMeshDeepCopy(t *testing.T) {
 				{
 					Name:            "c1",
 					Local:           true,
-					PodCIDRs:        []string{"10.0.0.0/16"},
-					WireguardCIDR:   "172.30.0.0/24",
-					AdditionalCIDRs: []string{"192.168.0.0/24"},
+					AllowedNetworks: []string{"10.0.0.0/16", "172.30.0.0/24", "192.168.0.0/24"},
 				},
 			},
 		},
@@ -132,17 +126,17 @@ func TestClusterMeshDeepCopy(t *testing.T) {
 
 	// Mutate the original after copying.
 	original.Spec.Clusters[0].Name = "mutated"
-	original.Spec.Clusters[0].PodCIDRs[0] = "99.99.99.0/24"
-	original.Spec.Clusters[0].AdditionalCIDRs[0] = "1.2.3.0/24"
+	original.Spec.Clusters[0].AllowedNetworks[0] = "99.99.99.0/24"
+	original.Spec.Clusters[0].AllowedNetworks[2] = "1.2.3.0/24"
 
 	// The copy must be unchanged.
 	assert.Equal(t, "c1", copied.Spec.Clusters[0].Name)
-	assert.Equal(t, "10.0.0.0/16", copied.Spec.Clusters[0].PodCIDRs[0])
-	assert.Equal(t, "192.168.0.0/24", copied.Spec.Clusters[0].AdditionalCIDRs[0])
+	assert.Equal(t, "10.0.0.0/16", copied.Spec.Clusters[0].AllowedNetworks[0])
+	assert.Equal(t, "192.168.0.0/24", copied.Spec.Clusters[0].AllowedNetworks[2])
 }
 
-// TestClusterEntryAllCIDRs verifies that AllCIDRs returns the correct union
-// for various combinations of optional fields.
+// TestClusterEntryAllCIDRs verifies that AllCIDRs returns the flat
+// AllowedNetworks list verbatim, preserving order.
 func TestClusterEntryAllCIDRs(t *testing.T) {
 	t.Parallel()
 
@@ -152,49 +146,25 @@ func TestClusterEntryAllCIDRs(t *testing.T) {
 		want  []string
 	}{
 		{
-			name: "required fields only",
+			name: "single entry",
 			entry: v1alpha1.ClusterEntry{
-				PodCIDRs:      []string{"10.0.0.0/16"},
-				WireguardCIDR: "172.30.0.0/24",
+				AllowedNetworks: []string{"10.0.0.0/16"},
+			},
+			want: []string{"10.0.0.0/16"},
+		},
+		{
+			name: "pod and wireguard CIDRs",
+			entry: v1alpha1.ClusterEntry{
+				AllowedNetworks: []string{"10.0.0.0/16", "172.30.0.0/24"},
 			},
 			want: []string{"10.0.0.0/16", "172.30.0.0/24"},
 		},
 		{
-			name: "with service CIDR",
+			name: "with service and additional CIDRs",
 			entry: v1alpha1.ClusterEntry{
-				PodCIDRs:      []string{"10.0.0.0/16"},
-				WireguardCIDR: "172.30.0.0/24",
-				ServiceCIDR:   "10.96.0.0/12",
-			},
-			want: []string{"10.0.0.0/16", "172.30.0.0/24", "10.96.0.0/12"},
-		},
-		{
-			name: "with additional CIDRs",
-			entry: v1alpha1.ClusterEntry{
-				PodCIDRs:        []string{"10.0.0.0/16"},
-				WireguardCIDR:   "172.30.0.0/24",
-				AdditionalCIDRs: []string{"192.168.1.0/24", "192.168.2.0/24"},
-			},
-			want: []string{"10.0.0.0/16", "172.30.0.0/24", "192.168.1.0/24", "192.168.2.0/24"},
-		},
-		{
-			name: "all fields set",
-			entry: v1alpha1.ClusterEntry{
-				PodCIDRs:        []string{"10.0.0.0/16", "fd00::/48"},
-				WireguardCIDR:   "172.30.0.0/24",
-				ServiceCIDR:     "10.96.0.0/12",
-				AdditionalCIDRs: []string{"192.168.0.0/24"},
+				AllowedNetworks: []string{"10.0.0.0/16", "fd00::/48", "172.30.0.0/24", "10.96.0.0/12", "192.168.0.0/24"},
 			},
 			want: []string{"10.0.0.0/16", "fd00::/48", "172.30.0.0/24", "10.96.0.0/12", "192.168.0.0/24"},
-		},
-		{
-			name: "empty service CIDR not included",
-			entry: v1alpha1.ClusterEntry{
-				PodCIDRs:      []string{"10.0.0.0/16"},
-				WireguardCIDR: "172.30.0.0/24",
-				ServiceCIDR:   "",
-			},
-			want: []string{"10.0.0.0/16", "172.30.0.0/24"},
 		},
 	}
 

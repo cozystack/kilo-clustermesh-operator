@@ -26,7 +26,7 @@ The operator runs on a single cluster and reaches remote clusters via kubeconfig
 - **Multi-cluster WireGuard mesh** — declarative `ClusterMesh` CRD bridges any number of clusters
 - **Fork-aware Kilo support** — accepts WireGuard IP annotations in both upstream (`<host>/32`) and Cozystack-patched (`<host>/<subnet-mask>`) form; normalises to host routes automatically
 - **Endpoint resolution chain** — per-node endpoint determined by priority: `clustermesh-endpoint` annotation → `force-endpoint` annotation → Node `ExternalIP` combined with `wireguardPort`; nodes with no resolvable endpoint are skipped cleanly
-- **Anchor peers** — a single per-cluster anchor `Peer` advertises `serviceCIDR` and `additionalCIDRs` so service and host-network ranges are reachable across clusters
+- **Anchor peers** — a single per-cluster anchor `Peer` advertises the `allowedNetworks` entries that no individual node already carries (e.g. service and host-network ranges) so they are reachable across clusters
 - **Embedded CRD bootstrap** — the operator self-applies its CRD at startup; no separate CRD pre-install step required
 - **Safe cluster reconfiguration** — a change-watcher triggers a controlled pod restart when cluster topology or kubeconfig Secrets change, rebuilding the client registry from scratch
 - **Finalizer-based cleanup** — removing a `ClusterMesh` CR triggers deletion of all managed `Peer` objects on every cluster before the resource is released
@@ -190,18 +190,20 @@ spec:
   clusters:
     - name: cluster-a
       local: true
-      podCIDRs: ["10.1.0.0/16"]
-      wireguardCIDR: "10.200.0.0/24"
+      allowedNetworks:           # pod, WireGuard and service CIDRs, all in one flat list
+        - "10.1.0.0/16"
+        - "10.200.0.0/24"
+        - "10.96.0.0/12"
       wireguardPort: 51820        # default; set explicitly if your cluster uses a different port
-      serviceCIDR: "10.96.0.0/12"
     - name: cluster-b
       kubeconfigSecretRef:
         name: cluster-b-kubeconfig
         key: kubeconfig
-      podCIDRs: ["10.2.0.0/16"]
-      wireguardCIDR: "10.200.1.0/24"
+      allowedNetworks:
+        - "10.2.0.0/16"
+        - "10.200.1.0/24"
+        - "10.112.0.0/12"
       wireguardPort: 51820
-      serviceCIDR: "10.112.0.0/12"
 ```
 
 > **Warning:** Pod CIDRs, WireGuard CIDRs, and service CIDRs must not overlap between any two clusters in the same namespace. Overlapping CIDRs block reconciliation for all affected meshes.
@@ -210,7 +212,7 @@ spec:
 
 ## How It Works
 
-On each reconcile cycle, the operator connects to every cluster in the `ClusterMesh` spec, lists all `Node` objects, validates each node's pod CIDR and WireGuard IP against the declared spec, and creates or updates Kilo `Peer` objects accordingly. Nodes that fail validation or have no resolvable endpoint are skipped. For each cluster that declares a `serviceCIDR` or `additionalCIDRs`, an anchor `Peer` carrying those CIDRs is also created on every other cluster. The operator uses a finalizer to clean up all managed peers when a `ClusterMesh` resource is deleted.
+On each reconcile cycle, the operator connects to every cluster in the `ClusterMesh` spec, lists all `Node` objects, validates that each node's pod CIDR and WireGuard IP fall within the cluster's declared `allowedNetworks`, and creates or updates Kilo `Peer` objects accordingly. Nodes that fail validation or have no resolvable endpoint are skipped. Any `allowedNetworks` entry that no individual node already advertises (e.g. the service CIDR or host-network ranges) is folded into a single anchor `Peer` on every other cluster. The operator uses a finalizer to clean up all managed peers when a `ClusterMesh` resource is deleted.
 
 See [./docs/architecture.md](./docs/architecture.md) for the full reconciliation flow and component details.
 

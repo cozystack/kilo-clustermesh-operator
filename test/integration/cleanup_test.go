@@ -126,19 +126,17 @@ func TestCleanupStaleSourceClusters_SweepsClustersOutsideSpec(t *testing.T) {
 		Spec: v1alpha1.ClusterMeshSpec{
 			Clusters: []v1alpha1.ClusterEntry{
 				{
-					Name:          "local",
-					Local:         true,
-					PodCIDRs:      []string{"10.1.0.0/16"},
-					WireguardCIDR: "10.100.0.0/24",
+					Name:            "local",
+					Local:           true,
+					AllowedNetworks: []string{"10.1.0.0/16", "10.100.0.0/24"},
 				},
 				{
 					// Placeholder to satisfy the CRD's minItems=2 on
 					// spec.clusters. Not in the registry — the
 					// registry exposes "local" and "remote", so this
 					// entry is effectively ignored by reconcile.
-					Name:          "ghost-elsewhere",
-					PodCIDRs:      []string{"10.2.0.0/16"},
-					WireguardCIDR: "10.100.1.0/24",
+					Name:            "ghost-elsewhere",
+					AllowedNetworks: []string{"10.2.0.0/16", "10.100.1.0/24"},
 				},
 			},
 		},

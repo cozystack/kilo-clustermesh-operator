@@ -57,7 +57,7 @@ func TestReconcile_SameFingerprint_NoCancelCalled(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "mesh1", Namespace: "default"},
 		Spec: v1alpha1.ClusterMeshSpec{
 			Clusters: []v1alpha1.ClusterEntry{
-				{Name: "local", Local: true, PodCIDRs: []string{"10.0.0.0/16"}, WireguardCIDR: "10.4.0.0/16"},
+				{Name: "local", Local: true, AllowedNetworks: []string{"10.0.0.0/16", "10.4.0.0/16"}},
 			},
 		},
 	}
@@ -90,7 +90,7 @@ func TestReconcile_NewMeshAdded_CancelCalled(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "mesh1", Namespace: "default"},
 		Spec: v1alpha1.ClusterMeshSpec{
 			Clusters: []v1alpha1.ClusterEntry{
-				{Name: "local", Local: true, PodCIDRs: []string{"10.0.0.0/16"}, WireguardCIDR: "10.4.0.0/16"},
+				{Name: "local", Local: true, AllowedNetworks: []string{"10.0.0.0/16", "10.4.0.0/16"}},
 			},
 		},
 	}
@@ -113,7 +113,7 @@ func TestReconcile_NewMeshAdded_CancelCalled(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "mesh2", Namespace: "default"},
 		Spec: v1alpha1.ClusterMeshSpec{
 			Clusters: []v1alpha1.ClusterEntry{
-				{Name: "remote", PodCIDRs: []string{"10.20.0.0/16"}, WireguardCIDR: "10.5.0.0/16"},
+				{Name: "remote", AllowedNetworks: []string{"10.20.0.0/16", "10.5.0.0/16"}},
 			},
 		},
 	}
@@ -144,8 +144,7 @@ func TestReconcile_SecretRVChanged_CancelCalled(t *testing.T) {
 				{
 					Name:                "remote",
 					KubeconfigSecretRef: &v1alpha1.SecretKeyRef{Name: "remote-kubeconfig", Key: "kubeconfig"},
-					PodCIDRs:            []string{"10.20.0.0/16"},
-					WireguardCIDR:       "10.5.0.0/16",
+					AllowedNetworks:     []string{"10.20.0.0/16", "10.5.0.0/16"},
 				},
 			},
 		},
@@ -185,8 +184,8 @@ func TestFingerprint_StableUnderReordering(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "mesh-a", Namespace: "default"},
 		Spec: v1alpha1.ClusterMeshSpec{
 			Clusters: []v1alpha1.ClusterEntry{
-				{Name: "alpha", Local: true, PodCIDRs: []string{"10.0.0.0/16"}, WireguardCIDR: "10.4.0.0/16"},
-				{Name: "beta", PodCIDRs: []string{"10.1.0.0/16"}, WireguardCIDR: "10.5.0.0/16"},
+				{Name: "alpha", Local: true, AllowedNetworks: []string{"10.0.0.0/16", "10.4.0.0/16"}},
+				{Name: "beta", AllowedNetworks: []string{"10.1.0.0/16", "10.5.0.0/16"}},
 			},
 		},
 	}
@@ -195,8 +194,8 @@ func TestFingerprint_StableUnderReordering(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "mesh-a", Namespace: "default"},
 		Spec: v1alpha1.ClusterMeshSpec{
 			Clusters: []v1alpha1.ClusterEntry{
-				{Name: "beta", PodCIDRs: []string{"10.1.0.0/16"}, WireguardCIDR: "10.5.0.0/16"},
-				{Name: "alpha", Local: true, PodCIDRs: []string{"10.0.0.0/16"}, WireguardCIDR: "10.4.0.0/16"},
+				{Name: "beta", AllowedNetworks: []string{"10.1.0.0/16", "10.5.0.0/16"}},
+				{Name: "alpha", Local: true, AllowedNetworks: []string{"10.0.0.0/16", "10.4.0.0/16"}},
 			},
 		},
 	}
@@ -245,7 +244,7 @@ func TestReconcile_NilCancel_NoPanic(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "mesh1", Namespace: "default"},
 		Spec: v1alpha1.ClusterMeshSpec{
 			Clusters: []v1alpha1.ClusterEntry{
-				{Name: "local", Local: true, PodCIDRs: []string{"10.0.0.0/16"}, WireguardCIDR: "10.4.0.0/16"},
+				{Name: "local", Local: true, AllowedNetworks: []string{"10.0.0.0/16", "10.4.0.0/16"}},
 			},
 		},
 	}

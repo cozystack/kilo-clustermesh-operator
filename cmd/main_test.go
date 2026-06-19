@@ -39,9 +39,8 @@ func sourceFromEntry(meshNamespace string, e kilov1alpha1.ClusterEntry) multiclu
 
 func entry(name string, podCIDR string) kilov1alpha1.ClusterEntry {
 	return kilov1alpha1.ClusterEntry{
-		Name:          name,
-		PodCIDRs:      []string{podCIDR},
-		WireguardCIDR: "10.4.0.0/16",
+		Name:            name,
+		AllowedNetworks: []string{podCIDR, "10.4.0.0/16"},
 	}
 }
 

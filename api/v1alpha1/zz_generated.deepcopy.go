@@ -33,13 +33,8 @@ func (in *ClusterEntry) DeepCopyInto(out *ClusterEntry) {
 		*out = new(SecretKeyRef)
 		**out = **in
 	}
-	if in.PodCIDRs != nil {
-		in, out := &in.PodCIDRs, &out.PodCIDRs
-		*out = make([]string, len(*in))
-		copy(*out, *in)
-	}
-	if in.AdditionalCIDRs != nil {
-		in, out := &in.AdditionalCIDRs, &out.AdditionalCIDRs
+	if in.AllowedNetworks != nil {
+		in, out := &in.AllowedNetworks, &out.AllowedNetworks
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}
