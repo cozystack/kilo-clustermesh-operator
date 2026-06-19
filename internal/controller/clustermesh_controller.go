@@ -19,6 +19,8 @@ package controller
 import (
 	"context"
 	"log/slog"
+	"net"
+	"strconv"
 	"time"
 
 	"github.com/cockroachdb/errors"
@@ -393,8 +395,10 @@ func (r *ClusterMeshReconciler) handleDeletion(ctx context.Context, log *slog.Lo
 
 	log.Info("deleting peers for mesh being removed")
 
-	for _, entry := range mesh.Spec.Clusters {
-		for _, targetEntry := range mesh.Spec.Clusters {
+	for ei := range mesh.Spec.Clusters {
+		entry := &mesh.Spec.Clusters[ei]
+		for ti := range mesh.Spec.Clusters {
+			targetEntry := &mesh.Spec.Clusters[ti]
 			if targetEntry.Name == entry.Name {
 				continue
 			}
@@ -639,7 +643,9 @@ func (r *ClusterMeshReconciler) pushPeersToTargets(ctx context.Context, log *slo
 
 	status.RegisteredPeers = len(desired)
 
-	for _, tgtEntry := range mesh.Spec.Clusters {
+	for i := range mesh.Spec.Clusters {
+		tgtEntry := &mesh.Spec.Clusters[i]
+
 		if tgtEntry.Name == srcEntry.Name {
 			continue
 		}
@@ -651,13 +657,133 @@ func (r *ClusterMeshReconciler) pushPeersToTargets(ctx context.Context, log *slo
 			continue
 		}
 
-		err = peer.ReconcilePeers(ctx, tgtClient, mesh.Name, srcEntry.Name, desired)
+		// Enrich peer endpoints with real NAT-observed IPs from the target
+		// cluster's nodes. Kilo on every target node records the actual source
+		// IP of each successful WireGuard handshake in
+		// kilo.squat.ai/discovered-endpoints. For source clusters behind NAT
+		// (no ExternalIP, only InternalIP) the discovered IP is the true
+		// reachable endpoint, whereas the Peer spec may contain only the
+		// internal address. Preferring the discovered value lets the operator
+		// self-heal: after the source cluster's Kilo initiates the first
+		// handshake, subsequent reconciles automatically use the correct
+		// external endpoint without any manual annotation.
+		//
+		// Enrichment is computed independently per target cluster: each target
+		// may observe different source IPs for the same peer (e.g. different
+		// NAT gateways), so we must not reuse enriched peers across targets.
+		pushDesired := desired
+
+		enriched, enrichErr := r.enrichEndpointsFromDiscovered(ctx, log, tgtClient, desired)
+		if enrichErr != nil {
+			// Non-fatal: log and continue with the original endpoints.
+			log.Warn("enriching peer endpoints from discovered-endpoints failed; using configured endpoints",
+				slog.String("source", srcEntry.Name),
+				slog.String("target", tgtEntry.Name),
+				slog.String("error", enrichErr.Error()),
+			)
+		} else {
+			pushDesired = enriched
+		}
+
+		err = peer.ReconcilePeers(ctx, tgtClient, mesh.Name, srcEntry.Name, pushDesired)
 		if err != nil {
 			return errors.Wrapf(err, "reconciling peers from %q to %q", srcEntry.Name, tgtEntry.Name)
 		}
 	}
 
 	return nil
+}
+
+// enrichEndpointsFromDiscovered replaces the configured endpoint on each
+// desired Peer with the endpoint observed via WireGuard handshakes on the
+// target cluster's nodes, when a more-specific (non-internal) address is
+// available. Source clusters behind NAT (no ExternalIP) only advertise their
+// InternalIP as the configured endpoint; the discovered value is the actual
+// egress IP after SNAT, which is what the target cluster must use to reach
+// them.
+//
+// The function is best-effort: if the target cluster is unreachable or has no
+// discovered-endpoint data, the original peers are returned unchanged.
+func (r *ClusterMeshReconciler) enrichEndpointsFromDiscovered(
+	ctx context.Context,
+	log *slog.Logger,
+	tgtClient client.Client,
+	desired []*kilov1alpha1.Peer,
+) ([]*kilov1alpha1.Peer, error) {
+	discoveredByKey, lookupErr := kilonode.DiscoveredEndpointsByKey(ctx, tgtClient)
+	if lookupErr != nil {
+		return desired, errors.Wrap(lookupErr, "listing nodes for discovered-endpoint lookup")
+	}
+
+	if len(discoveredByKey) == 0 {
+		return desired, nil
+	}
+
+	enriched := make([]*kilov1alpha1.Peer, len(desired))
+
+	for i, peerObj := range desired {
+		discoveredEndpoint, ok := discoveredByKey[peerObj.Spec.PublicKey]
+		if !ok {
+			enriched[i] = peerObj
+
+			continue
+		}
+
+		// Only override when the discovered address differs from the
+		// configured one. Skip if the Peer already has the right endpoint.
+		configured := ""
+		if peerObj.Spec.Endpoint != nil {
+			configured = peerObj.Spec.Endpoint.IP
+		}
+
+		if configured == "" || discoveredEndpoint != configured+":"+strconv.Itoa(int(peerObj.Spec.Endpoint.Port)) {
+			parsedEndpoint, parseErr := parseDiscoveredEndpoint(discoveredEndpoint)
+			if parseErr != nil {
+				log.Warn("ignoring malformed discovered endpoint",
+					slog.String("peer", peerObj.Name),
+					slog.String("endpoint", discoveredEndpoint),
+					slog.String("error", parseErr.Error()),
+				)
+				enriched[i] = peerObj
+
+				continue
+			}
+
+			updated := peerObj.DeepCopy()
+			updated.Spec.Endpoint = parsedEndpoint
+			enriched[i] = updated
+
+			log.Debug("overriding peer endpoint with discovered value",
+				slog.String("peer", peerObj.Name),
+				slog.String("configured", configured),
+				slog.String("discovered", discoveredEndpoint),
+			)
+
+			continue
+		}
+
+		enriched[i] = peerObj
+	}
+
+	return enriched, nil
+}
+
+// parseDiscoveredEndpoint parses a "host:port" string into a *kilov1alpha1.PeerEndpoint.
+func parseDiscoveredEndpoint(hostPort string) (*kilov1alpha1.PeerEndpoint, error) {
+	host, portStr, splitErr := net.SplitHostPort(hostPort)
+	if splitErr != nil {
+		return nil, errors.Wrap(splitErr, "splitting discovered endpoint host:port")
+	}
+
+	port, parseErr := strconv.ParseUint(portStr, 10, 16)
+	if parseErr != nil {
+		return nil, errors.Wrapf(parseErr, "parsing port in discovered endpoint %q", hostPort)
+	}
+
+	return &kilov1alpha1.PeerEndpoint{
+		DNSOrIP: kilov1alpha1.DNSOrIP{IP: host},
+		Port:    uint32(port),
+	}, nil
 }
 
 // updateStatus sets Ready=True and writes the cluster statuses.

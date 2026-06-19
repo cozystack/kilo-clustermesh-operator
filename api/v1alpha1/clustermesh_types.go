@@ -79,6 +79,17 @@ type ClusterEntry struct {
 	// (e.g., host-network ranges, external subnets).
 	// +optional
 	AdditionalCIDRs []string `json:"additionalCIDRs,omitempty"` //nolint:tagliatelle // "additionalCIDRs" is the canonical field name; "CIDR" is a well-known acronym
+
+	// PersistentKeepalive is the interval in seconds at which WireGuard
+	// sends keepalive packets to peers in this cluster. Set to a non-zero
+	// value (e.g. 25) for clusters behind NAT so that the stateful NAT
+	// mapping is refreshed before it expires, enabling bidirectional traffic
+	// even when the cluster has no directly-routable public IP.
+	// 0 disables persistent keepalive (default).
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=65535
+	// +optional
+	PersistentKeepalive int `json:"persistentKeepalive,omitempty"`
 }
 
 // AllCIDRs returns the union of all CIDRs declared by this cluster entry.
