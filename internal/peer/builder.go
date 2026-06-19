@@ -80,6 +80,14 @@ func BuildPeer(meshName string, entry *v1alpha1.ClusterEntry, node *corev1.Node,
 
 	allowedIPs := make([]string, 0, 2+len(extraAllowedIPs))
 	allowedIPs = append(allowedIPs, node.Spec.PodCIDRs[0], netutil.HostRoute(hostIP))
+	// Advertise the node's own InternalIP(s) as host routes when the cluster
+	// declares the surrounding range in AllowedNetworks. This is the host-IP
+	// analogue of the pod CIDR taken from Node.Spec above: host-networked
+	// workloads (e.g. Ceph mons/OSDs) are reachable at the node's own address,
+	// so each node carries its InternalIP directly on its own Peer instead of
+	// the whole range funnelling through one anchor. Gated on AllowedNetworks
+	// so the operator never advertises an undeclared host address.
+	allowedIPs = append(allowedIPs, nodeInternalIPHostRoutes(node, entry.AllowedNetworks)...)
 	allowedIPs = append(allowedIPs, extraAllowedIPs...)
 
 	endpoint, err := resolvePeerEndpoint(node, entry.WireguardPort)
@@ -101,6 +109,51 @@ func BuildPeer(meshName string, entry *v1alpha1.ClusterEntry, node *corev1.Node,
 	}
 
 	return peer, nil
+}
+
+// nodeInternalIPHostRoutes returns /32 (resp. /128) host routes for the node's
+// InternalIP addresses that fall within one of allowedNetworks. It is the
+// host-IP analogue of taking the pod CIDR from Node.Spec: a host-networked
+// workload (e.g. Ceph mons/OSDs) is reachable at the node's own address, so
+// when the cluster declares the surrounding range the operator advertises that
+// address directly on the node's Peer. Addresses outside allowedNetworks are
+// skipped so the operator never advertises an undeclared host address.
+func nodeInternalIPHostRoutes(node *corev1.Node, allowedNetworks []string) []string {
+	var routes []string
+
+	for _, addr := range node.Status.Addresses {
+		if addr.Type != corev1.NodeInternalIP {
+			continue
+		}
+
+		internalIP := net.ParseIP(addr.Address)
+		if internalIP == nil {
+			continue
+		}
+
+		if ipInAnyNetwork(internalIP, allowedNetworks) {
+			routes = append(routes, netutil.HostRoute(internalIP))
+		}
+	}
+
+	return routes
+}
+
+// ipInAnyNetwork reports whether addr falls within any of the supplied CIDRs.
+// Unparseable CIDRs are skipped.
+func ipInAnyNetwork(addr net.IP, networks []string) bool {
+	for _, networkStr := range networks {
+		network, err := netutil.ParseCIDR(networkStr)
+		if err != nil {
+			continue
+		}
+
+		if network.Contains(addr) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // CollectAnchorCIDRs returns the residual entries of entry.AllowedNetworks
@@ -164,6 +217,20 @@ func nodeCoversNetwork(network *net.IPNet, node *corev1.Node) bool {
 	if len(node.Spec.PodCIDRs) > 0 {
 		nodeCIDR, err := netutil.ParseCIDR(node.Spec.PodCIDRs[0])
 		if err == nil && netutil.CIDRContains(network, nodeCIDR) {
+			return true
+		}
+	}
+
+	// A node's InternalIP is advertised as a /32 host route by BuildPeer (when
+	// it falls within AllowedNetworks), so it also covers any network that
+	// contains it — keeping a declared host-network range distributed per-node
+	// rather than funnelled through the anchor.
+	for _, addr := range node.Status.Addresses {
+		if addr.Type != corev1.NodeInternalIP {
+			continue
+		}
+
+		if internalIP := net.ParseIP(addr.Address); internalIP != nil && network.Contains(internalIP) {
 			return true
 		}
 	}

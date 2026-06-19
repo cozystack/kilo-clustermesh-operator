@@ -27,6 +27,7 @@ The operator runs on a single cluster and reaches remote clusters via kubeconfig
 - **Fork-aware Kilo support** — accepts WireGuard IP annotations in both upstream (`<host>/32`) and Cozystack-patched (`<host>/<subnet-mask>`) form; normalises to host routes automatically
 - **Endpoint resolution chain** — per-node endpoint determined by priority: `clustermesh-endpoint` annotation → `force-endpoint` annotation → Node `ExternalIP` combined with `wireguardPort`; nodes with no resolvable endpoint are skipped cleanly
 - **Anchor peers** — a single per-cluster anchor `Peer` advertises the `allowedNetworks` entries that no individual node already carries (e.g. service and host-network ranges) so they are reachable across clusters
+- **Per-node host routes** — a node's `InternalIP` that falls within `allowedNetworks` is advertised as a `/32` (resp. `/128`) host route on that node's own `Peer`, so host-networked workloads (e.g. Ceph mons/OSDs) are reachable directly at each node instead of funnelling the whole range through the anchor
 - **Embedded CRD bootstrap** — the operator self-applies its CRD at startup; no separate CRD pre-install step required
 - **Safe cluster reconfiguration** — a change-watcher triggers a controlled pod restart when cluster topology or kubeconfig Secrets change, rebuilding the client registry from scratch
 - **Finalizer-based cleanup** — removing a `ClusterMesh` CR triggers deletion of all managed `Peer` objects on every cluster before the resource is released
@@ -212,7 +213,7 @@ spec:
 
 ## How It Works
 
-On each reconcile cycle, the operator connects to every cluster in the `ClusterMesh` spec, lists all `Node` objects, validates that each node's pod CIDR and WireGuard IP fall within the cluster's declared `allowedNetworks`, and creates or updates Kilo `Peer` objects accordingly. Nodes that fail validation or have no resolvable endpoint are skipped. Any `allowedNetworks` entry that no individual node already advertises (e.g. the service CIDR or host-network ranges) is folded into a single anchor `Peer` on every other cluster. The operator uses a finalizer to clean up all managed peers when a `ClusterMesh` resource is deleted.
+On each reconcile cycle, the operator connects to every cluster in the `ClusterMesh` spec, lists all `Node` objects, validates that each node's pod CIDR and WireGuard IP fall within the cluster's declared `allowedNetworks`, and creates or updates Kilo `Peer` objects accordingly. Nodes that fail validation or have no resolvable endpoint are skipped. Each node's `Peer` also carries any of its `InternalIP` addresses that fall within `allowedNetworks` as `/32` (resp. `/128`) host routes, so host-networked workloads are reachable directly at each node. Any `allowedNetworks` entry that no individual node already advertises (e.g. the service CIDR or host-network ranges with no node address in them) is folded into a single anchor `Peer` on every other cluster. The operator uses a finalizer to clean up all managed peers when a `ClusterMesh` resource is deleted.
 
 See [./docs/architecture.md](./docs/architecture.md) for the full reconciliation flow and component details.
 
