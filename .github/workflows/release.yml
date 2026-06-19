@@ -72,20 +72,11 @@ jobs:
             helm registry login ghcr.io \
               --username "${{ github.actor }}" \
               --password-stdin
-      # flux push artifact uses docker's config.json for OCI auth, separate
-      # from helm's own keyring. Without this step the bundle push gets
-      # `DENIED: requested access to the resource is denied`.
-      - name: Log in to GHCR (docker)
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
       # On tag pushes the release version is authoritative: stamp it into
-      # both Chart.yaml files (operator chart + Cozystack wrapper) before
-      # `helm package` so the published artifacts carry the tag instead
-      # of the in-repo dev-base appVersion. The repo's Chart.yaml stays
-      # at the dev base (0.1.0); only tagged releases get stamped.
+      # the operator chart's Chart.yaml before `helm package` so the
+      # published artifact carries the tag instead of the in-repo dev-base
+      # appVersion. The repo's Chart.yaml stays at the dev base (0.1.0);
+      # only tagged releases get stamped.
       - name: Stamp release version into chart metadata
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
@@ -94,17 +85,8 @@ jobs:
             --expression "s/^version: .*/version: ${ver}/" \
             --expression "s/^appVersion: .*/appVersion: \"${ver}\"/" \
             charts/kilo-clustermesh-operator/Chart.yaml
-          # Wrapper: align appVersion AND the local-path dependency pin
-          # on the operator chart so `helm dependency update` resolves
-          # against the stamped inner chart.
-          sed --in-place \
-            --expression "s/^appVersion: .*/appVersion: \"${ver}\"/" \
-            --expression "s/^    version: \".*\"/    version: \"${ver}\"/" \
-            packages/system/kilo-clustermesh-operator/Chart.yaml
           echo "--- stamped operator chart ---"
           cat charts/kilo-clustermesh-operator/Chart.yaml
-          echo "--- stamped wrapper chart ---"
-          cat packages/system/kilo-clustermesh-operator/Chart.yaml
       - name: Package and push operator chart
         run: |
           # Push under /charts/ subpath so the chart's OCI repository does
@@ -113,39 +95,3 @@ jobs:
           for tgz in _dist/*.tgz; do
             helm push "$tgz" oci://ghcr.io/cozystack/charts
           done
-      - name: Package and push Cozystack package
-        run: |
-          rm -rf _dist && mkdir _dist
-          helm dependency update packages/system/kilo-clustermesh-operator
-          helm package packages/system/kilo-clustermesh-operator --destination _dist/
-          for tgz in _dist/*.tgz; do
-            helm push "$tgz" oci://ghcr.io/cozystack/charts
-          done
-
-      # Build a Cozystack-package bundle OCI artifact from the packages/
-      # directory. This shape lets cozystack-engine auto-create the
-      # ArtifactGenerator from the PackageSource (init.yaml) and unblocks
-      # the install via Package -> HelmRelease.
-      - name: Install flux CLI
-        uses: fluxcd/flux2/action@v2.8.8
-      - name: Compute bundle tag
-        id: bundletag
-        run: |
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            ver="${GITHUB_REF#refs/tags/v}"
-          else
-            ver=$(awk '/^appVersion:/ {gsub(/"/, "", $2); print $2}' charts/kilo-clustermesh-operator/Chart.yaml)
-            ver="${ver}-sha-${GITHUB_SHA::8}"
-          fi
-          echo "value=$ver" >> "$GITHUB_OUTPUT"
-      - name: Push Cozystack package bundle
-        run: |
-          # The wrapper chart at packages/system/kilo-clustermesh-operator
-          # already has its dependency tarball populated by the preceding
-          # "Package and push Cozystack package" step, so the extracted
-          # artifact is self-contained.
-          flux push artifact \
-            "oci://ghcr.io/${{ github.repository_owner }}/kilo-clustermesh-operator-packages:${{ steps.bundletag.outputs.value }}" \
-            --path=packages \
-            --source="${{ github.server_url }}/${{ github.repository }}" \
-            --revision="${{ steps.bundletag.outputs.value }}@sha1:${{ github.sha }}"
