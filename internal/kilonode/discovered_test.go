@@ -24,10 +24,24 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/squat/kilo-clustermesh-operator/internal/kilonode"
 )
+
+// ensureScheme returns a runtime.Scheme with the core/v1 types registered,
+// for constructing the controller-runtime fake client.
+func ensureScheme(t *testing.T) *runtime.Scheme {
+	t.Helper()
+
+	scheme := runtime.NewScheme()
+
+	err := corev1.AddToScheme(scheme)
+	require.NoError(t, err)
+
+	return scheme
+}
 
 // nodeWithDiscovered returns a Node carrying the kilo.squat.ai/discovered-endpoints
 // annotation with the given raw JSON value (empty string means no annotation).
