@@ -544,3 +544,81 @@ func TestCollectAnchorCIDRs(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildPeer_AdvertisesInternalIPInAllowedNetworks(t *testing.T) {
+	t.Parallel()
+
+	// A host-networked workload (e.g. a Ceph mon) is reachable at the node's
+	// own InternalIP. When the cluster declares the surrounding range in
+	// AllowedNetworks, BuildPeer advertises that address as a /32 host route on
+	// the node's own Peer — the host-IP analogue of the pod CIDR.
+	entry := &v1alpha1.ClusterEntry{
+		Name:            "nuvolos-ceph",
+		AllowedNetworks: []string{"10.244.0.0/16", "192.168.103.0/24"},
+		WireguardPort:   51820,
+	}
+
+	node := testNode("ceph-1", testPodCIDR, baseAnnotations())
+	node.Status.Addresses = []corev1.NodeAddress{
+		{Type: corev1.NodeInternalIP, Address: "192.168.103.11"},
+	}
+
+	got, err := peer.BuildPeer("my-mesh", entry, node, nil)
+
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Contains(t, got.Spec.AllowedIPs, "192.168.103.11/32",
+		"node InternalIP within AllowedNetworks must be advertised as a /32 host route")
+}
+
+func TestBuildPeer_SkipsInternalIPOutsideAllowedNetworks(t *testing.T) {
+	t.Parallel()
+
+	// The node's InternalIP is not covered by any AllowedNetworks entry (e.g. a
+	// tenant worker's eth0 address that the cluster never declared). BuildPeer
+	// must NOT advertise it — otherwise the operator would leak an undeclared
+	// host address into the Peer, breaking the "nothing outside AllowedNetworks
+	// ends up in a Peer" bound.
+	entry := &v1alpha1.ClusterEntry{
+		Name:            "cluster-a",
+		AllowedNetworks: []string{"10.244.0.0/16"},
+		WireguardPort:   51820,
+	}
+
+	node := testNode("worker-1", testPodCIDR, baseAnnotations())
+	node.Status.Addresses = []corev1.NodeAddress{
+		{Type: corev1.NodeInternalIP, Address: "192.0.2.50"},
+	}
+
+	got, err := peer.BuildPeer("my-mesh", entry, node, nil)
+
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.NotContains(t, got.Spec.AllowedIPs, "192.0.2.50/32",
+		"node InternalIP outside AllowedNetworks must not be advertised")
+}
+
+func TestCollectAnchorCIDRs_HostNetCoveredByNodeInternalIP(t *testing.T) {
+	t.Parallel()
+
+	// When a node's InternalIP falls within a declared host-network range, that
+	// range is carried per-node (BuildPeer adds the /32 host route), so it must
+	// NOT be folded into the anchor — otherwise traffic would funnel through one
+	// node instead of reaching each host directly.
+	node := testNode("ceph-1", "10.244.1.0/24", map[string]string{
+		kilonode.AnnotationWireguardIP: "10.4.0.1/32",
+		kilonode.AnnotationPublicKey:   testPubKey,
+	})
+	node.Status.Addresses = []corev1.NodeAddress{
+		{Type: corev1.NodeInternalIP, Address: "192.168.103.11"},
+	}
+
+	entry := &v1alpha1.ClusterEntry{
+		Name:            "nuvolos-ceph",
+		AllowedNetworks: []string{"192.168.103.0/24"},
+	}
+
+	got := peer.CollectAnchorCIDRs(entry, []*corev1.Node{node})
+	assert.Empty(t, got,
+		"host-network range with a per-node InternalIP representative must not be anchored")
+}
