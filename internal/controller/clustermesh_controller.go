@@ -667,6 +667,12 @@ func (r *ClusterMeshReconciler) pushPeersToTargets(ctx context.Context, log *slo
 		// self-heal: after the source cluster's Kilo initiates the first
 		// handshake, subsequent reconciles automatically use the correct
 		// external endpoint without any manual annotation.
+		//
+		// Enrichment is computed independently per target cluster: each target
+		// may observe different source IPs for the same peer (e.g. different
+		// NAT gateways), so we must not reuse enriched peers across targets.
+		pushDesired := desired
+
 		enriched, enrichErr := r.enrichEndpointsFromDiscovered(ctx, log, tgtClient, desired)
 		if enrichErr != nil {
 			// Non-fatal: log and continue with the original endpoints.
@@ -676,10 +682,10 @@ func (r *ClusterMeshReconciler) pushPeersToTargets(ctx context.Context, log *slo
 				slog.String("error", enrichErr.Error()),
 			)
 		} else {
-			desired = enriched
+			pushDesired = enriched
 		}
 
-		err = peer.ReconcilePeers(ctx, tgtClient, mesh.Name, srcEntry.Name, desired)
+		err = peer.ReconcilePeers(ctx, tgtClient, mesh.Name, srcEntry.Name, pushDesired)
 		if err != nil {
 			return errors.Wrapf(err, "reconciling peers from %q to %q", srcEntry.Name, tgtEntry.Name)
 		}

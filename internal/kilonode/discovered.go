@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"strconv"
 
 	"github.com/cockroachdb/errors"
 	corev1 "k8s.io/api/core/v1"
@@ -91,39 +92,10 @@ func DiscoveredEndpointsByKey(ctx context.Context, kubeClient client.Client) (ma
 			// the same key should have seen the same source IP (the peer's NAT
 			// egress), so any entry is equally authoritative.
 			if _, seen := result[pubKey]; !seen {
-				result[pubKey] = net.JoinHostPort(entry.IP, itoa(entry.Port))
+				result[pubKey] = net.JoinHostPort(entry.IP, strconv.Itoa(entry.Port))
 			}
 		}
 	}
 
 	return result, nil
-}
-
-// itoa converts an int to its decimal string representation without importing
-// strconv at the call site.
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-
-	buf := [20]byte{}
-	pos := len(buf)
-	neg := n < 0
-
-	if neg {
-		n = -n
-	}
-
-	for n > 0 {
-		pos--
-		buf[pos] = byte('0' + n%10)
-		n /= 10
-	}
-
-	if neg {
-		pos--
-		buf[pos] = '-'
-	}
-
-	return string(buf[pos:])
 }
