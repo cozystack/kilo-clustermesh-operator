@@ -82,8 +82,20 @@ func IsTransient(reason NodeSkipReason) bool {
 
 // ValidateNode checks whether a node is eligible to be peered.
 // It validates the node's PodCIDR and WireGuard IP against the cluster's
-// AllowedNetworks (each must fall within some declared entry), and that the
-// node exposes a resolvable WireGuard endpoint via the kilonode fallback chain.
+// AllowedNetworks (each must fall within some declared entry) and that the
+// node carries a public key.
+//
+// A node with NO resolvable endpoint is NOT skipped: BuildPeer emits a peer
+// with Endpoint=nil (a "roaming" WireGuard peer). A NAT'd tenant node can have
+// no force-endpoint and no ExternalIP until traffic flows, yet it can still
+// initiate the handshake outbound to a public endpoint (e.g. Ceph), and the
+// far side learns the peer's address from that first inbound handshake.
+// Skipping it would deadlock bootstrap: no peer → no traffic → the
+// discovered-endpoint enrichment never populates → the node stays
+// endpoint-less forever. A present-but-malformed endpoint annotation is still
+// a skip (ReasonEndpointInvalid) — that is operator misconfiguration, not a
+// roaming peer.
+//
 // Returns (true, reason, message) if the node should be skipped, (false, "", "") if valid.
 func ValidateNode(node *corev1.Node, entry *v1alpha1.ClusterEntry) (bool, NodeSkipReason, string) {
 	if skip, reason, msg := validatePodCIDR(node, entry); skip {
@@ -180,22 +192,16 @@ func validatePublicKey(node *corev1.Node) (bool, NodeSkipReason, string) {
 	return false, "", ""
 }
 
-// validateEndpoint checks that the node has a resolvable WireGuard endpoint
-// via the kilonode fallback chain. A present-but-malformed annotation is a
-// distinct failure mode (ReasonEndpointInvalid) from a node with no source
-// at all (ReasonNoEndpoint).
+// validateEndpoint rejects a node only when its endpoint annotation is present
+// but malformed (ReasonEndpointInvalid). A node with NO resolvable endpoint
+// source at all is NOT rejected: it is peered as a roaming WireGuard peer
+// (Endpoint=nil) so NAT'd nodes can bootstrap by initiating the handshake
+// outbound. See the ValidateNode doc comment for the deadlock this avoids.
 func validateEndpoint(node *corev1.Node, entry *v1alpha1.ClusterEntry) (bool, NodeSkipReason, string) {
-	_, found, err := kilonode.ResolveEndpoint(node, entry.WireguardPort)
+	_, _, err := kilonode.ResolveEndpoint(node, entry.WireguardPort)
 	if err != nil {
 		return true, ReasonEndpointInvalid, fmt.Sprintf(
 			"node %q has an invalid endpoint annotation: %v", node.Name, err,
-		)
-	}
-
-	if !found {
-		return true, ReasonNoEndpoint, fmt.Sprintf(
-			"node %q has no resolvable endpoint (no clustermesh-endpoint, force-endpoint, or ExternalIP)",
-			node.Name,
 		)
 	}
 
