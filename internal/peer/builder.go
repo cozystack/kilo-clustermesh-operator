@@ -51,7 +51,16 @@ import (
 // union of AllowedIPs, so neither half can clobber the other.
 //
 // extraAllowedIPs may be nil for non-anchor nodes.
-func BuildPeer(meshName string, entry *v1alpha1.ClusterEntry, node *corev1.Node, extraAllowedIPs []string) (*kilov1alpha1.Peer, error) {
+//
+// meshKeepalive is the mesh-wide PersistentKeepalive (the maximum declared
+// across every ClusterEntry of the mesh). The Peer's keepalive is the max of
+// this and the source entry's own value, so that if any cluster in the mesh
+// declares keepalive (NAT present somewhere), every peer in the mesh refreshes
+// its NAT mapping in both directions. The ceph-side peer for a tenant node is
+// built from the tenant's SELF entry, whose PersistentKeepalive is 0; without
+// the mesh-wide floor the Ceph→tenant direction would have no keepalive and
+// the NAT mapping would expire, flapping the tunnel.
+func BuildPeer(meshName string, entry *v1alpha1.ClusterEntry, node *corev1.Node, extraAllowedIPs []string, meshKeepalive int) (*kilov1alpha1.Peer, error) {
 	pubKey := node.Annotations[kilonode.AnnotationPublicKey]
 	if pubKey == "" {
 		return nil, errors.Newf("node %q has no public key annotation", node.Name)
@@ -80,15 +89,20 @@ func BuildPeer(meshName string, entry *v1alpha1.ClusterEntry, node *corev1.Node,
 
 	allowedIPs := make([]string, 0, 2+len(extraAllowedIPs))
 	allowedIPs = append(allowedIPs, node.Spec.PodCIDRs[0], netutil.HostRoute(hostIP))
-	// Advertise the node's own InternalIP(s) as host routes when the cluster
-	// declares the surrounding range in AllowedNetworks. This is the host-IP
-	// analogue of the pod CIDR taken from Node.Spec above: host-networked
-	// workloads (e.g. Ceph mons/OSDs) are reachable at the node's own address,
-	// so each node carries its InternalIP directly on its own Peer instead of
-	// the whole range funnelling through one anchor. Gated on AllowedNetworks
-	// so the operator never advertises an undeclared host address.
-	allowedIPs = append(allowedIPs, nodeInternalIPHostRoutes(node, entry.AllowedNetworks)...)
+	// Always advertise the node's own InternalIP(s) as host routes, regardless
+	// of AllowedNetworks. A host-networked workload (e.g. the CephFS CSI
+	// nodeplugin, which runs hostNetwork=true) sends to the far side with
+	// src = the node's own InternalIP; if that /32 is not in the peer's
+	// AllowedIPs, WireGuard crypto-routing on the receiving side drops the
+	// packet (observed as `rados: ret=-110` mount timeouts). The node's own
+	// address is by definition reachable, so carrying it on the node's own
+	// Peer is not "advertising an undeclared address" — and it must NOT be
+	// gated on AllowedNetworks, because adding the node subnet there would
+	// trip the cross-mesh CIDR-overlap detector (a node subnet can be a subset
+	// of another tenant's podCIDR).
+	allowedIPs = append(allowedIPs, nodeOwnInternalIPHostRoutes(node)...)
 	allowedIPs = append(allowedIPs, extraAllowedIPs...)
+	allowedIPs = dedupeStrings(allowedIPs)
 
 	endpoint, err := resolvePeerEndpoint(node, entry.WireguardPort)
 	if err != nil {
@@ -101,24 +115,54 @@ func BuildPeer(meshName string, entry *v1alpha1.ClusterEntry, node *corev1.Node,
 			Labels: Labels(meshName, entry.Name),
 		},
 		Spec: kilov1alpha1.PeerSpec{
-			AllowedIPs:          allowedIPs,
-			PublicKey:           pubKey,
-			Endpoint:            endpoint,
-			PersistentKeepalive: entry.PersistentKeepalive,
+			AllowedIPs: allowedIPs,
+			PublicKey:  pubKey,
+			Endpoint:   endpoint,
+			// Mesh-wide keepalive floor: if any cluster in the mesh declares
+			// keepalive (NAT present), every peer gets it so NAT mappings are
+			// refreshed in BOTH directions. See the doc comment for the
+			// ceph-side self-entry rationale.
+			PersistentKeepalive: max(entry.PersistentKeepalive, meshKeepalive),
 		},
 	}
 
 	return peer, nil
 }
 
-// nodeInternalIPHostRoutes returns /32 (resp. /128) host routes for the node's
-// InternalIP addresses that fall within one of allowedNetworks. It is the
-// host-IP analogue of taking the pod CIDR from Node.Spec: a host-networked
-// workload (e.g. Ceph mons/OSDs) is reachable at the node's own address, so
-// when the cluster declares the surrounding range the operator advertises that
-// address directly on the node's Peer. Addresses outside allowedNetworks are
-// skipped so the operator never advertises an undeclared host address.
-func nodeInternalIPHostRoutes(node *corev1.Node, allowedNetworks []string) []string {
+// dedupeStrings returns routes with duplicate values removed, preserving the
+// order of first appearance. Used to collapse duplicate /32 host routes (e.g.
+// when a node's wireguard-ip host IP and its InternalIP coincide, or when the
+// same InternalIP is listed more than once in Node.Status.Addresses).
+func dedupeStrings(routes []string) []string {
+	seen := make(map[string]struct{}, len(routes))
+	out := routes[:0]
+
+	for _, route := range routes {
+		if _, ok := seen[route]; ok {
+			continue
+		}
+
+		seen[route] = struct{}{}
+		out = append(out, route)
+	}
+
+	return out
+}
+
+// nodeOwnInternalIPHostRoutes returns /32 (resp. /128) host routes for every
+// NodeInternalIP address of the node, unconditionally. It is the host-IP
+// analogue of taking the pod CIDR from Node.Spec: a host-networked workload
+// (e.g. the CephFS CSI nodeplugin) sends with src = the node's own InternalIP,
+// so that /32 must be in the node's own Peer's AllowedIPs or WireGuard
+// crypto-routing on the far side drops the packet.
+//
+// Unlike pod CIDRs or the service CIDR, the node's own address is by definition
+// reachable, so advertising it is correct without being declared in
+// AllowedNetworks — and it must not be gated on AllowedNetworks, because adding
+// the node subnet there would trip the cross-mesh CIDR-overlap detector (a
+// /24 node subnet of one tenant can be a subset of another tenant's /16
+// podCIDR). Unparseable addresses are skipped.
+func nodeOwnInternalIPHostRoutes(node *corev1.Node) []string {
 	var routes []string
 
 	for _, addr := range node.Status.Addresses {
@@ -131,29 +175,10 @@ func nodeInternalIPHostRoutes(node *corev1.Node, allowedNetworks []string) []str
 			continue
 		}
 
-		if ipInAnyNetwork(internalIP, allowedNetworks) {
-			routes = append(routes, netutil.HostRoute(internalIP))
-		}
+		routes = append(routes, netutil.HostRoute(internalIP))
 	}
 
 	return routes
-}
-
-// ipInAnyNetwork reports whether addr falls within any of the supplied CIDRs.
-// Unparseable CIDRs are skipped.
-func ipInAnyNetwork(addr net.IP, networks []string) bool {
-	for _, networkStr := range networks {
-		network, err := netutil.ParseCIDR(networkStr)
-		if err != nil {
-			continue
-		}
-
-		if network.Contains(addr) {
-			return true
-		}
-	}
-
-	return false
 }
 
 // CollectAnchorCIDRs returns the residual entries of entry.AllowedNetworks
@@ -250,8 +275,18 @@ func nodeCoversNetwork(network *net.IPNet, node *corev1.Node) bool {
 
 // resolvePeerEndpoint resolves a node's WireGuard endpoint via the kilonode
 // fallback chain (clustermesh-endpoint annotation → force-endpoint annotation
-// → ExternalIP) and parses the result into a PeerEndpoint. A present-but-
-// malformed annotation, or a node with no source at all, surfaces as an error.
+// → ExternalIP) and parses the result into a PeerEndpoint.
+//
+// A node with no resolvable source yields (nil, nil): the Peer is emitted with
+// Endpoint=nil, a "roaming" WireGuard peer. This is required for NAT'd tenant
+// nodes that have no force-endpoint and no ExternalIP yet — the tenant can
+// still initiate the handshake outbound to Ceph's public endpoint, and the far
+// side learns the peer's address from that first inbound handshake. Skipping
+// such a node would deadlock bootstrap (no peer → no traffic → discovered
+// endpoint never populates → node stays unresolvable).
+//
+// A present-but-malformed annotation still surfaces as an error: that is
+// operator misconfiguration, not a roaming peer.
 func resolvePeerEndpoint(node *corev1.Node, fallbackPort uint16) (*kilov1alpha1.PeerEndpoint, error) {
 	endpointStr, found, err := kilonode.ResolveEndpoint(node, fallbackPort)
 	if err != nil {
@@ -259,7 +294,7 @@ func resolvePeerEndpoint(node *corev1.Node, fallbackPort uint16) (*kilov1alpha1.
 	}
 
 	if !found {
-		return nil, errors.Newf("node %q has no resolvable endpoint", node.Name)
+		return nil, nil //nolint:nilnil // a roaming peer legitimately has no endpoint
 	}
 
 	endpoint, err := parseEndpoint(endpointStr)

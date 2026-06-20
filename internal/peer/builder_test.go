@@ -80,7 +80,7 @@ func TestBuildPeer_HappyPath(t *testing.T) {
 
 	node := testNode("worker-1", testPodCIDR, annotations)
 
-	got, err := peer.BuildPeer("my-mesh", testEntry(), node, nil)
+	got, err := peer.BuildPeer("my-mesh", testEntry(), node, nil, 0)
 
 	require.NoError(t, err)
 	require.NotNil(t, got)
@@ -108,7 +108,7 @@ func TestBuildPeer_CozystackStyleWGAnnotation(t *testing.T) {
 
 	node := testNode("worker-1", testPodCIDR, annotations)
 
-	got, err := peer.BuildPeer("my-mesh", testEntry(), node, nil)
+	got, err := peer.BuildPeer("my-mesh", testEntry(), node, nil, 0)
 
 	require.NoError(t, err)
 	require.NotNil(t, got)
@@ -126,7 +126,7 @@ func TestBuildPeer_InvalidWireguardIP(t *testing.T) {
 
 	node := testNode("worker-1", testPodCIDR, annotations)
 
-	got, err := peer.BuildPeer("my-mesh", testEntry(), node, nil)
+	got, err := peer.BuildPeer("my-mesh", testEntry(), node, nil, 0)
 
 	require.Error(t, err)
 	assert.Nil(t, got)
@@ -141,7 +141,7 @@ func TestBuildPeer_MissingPublicKey(t *testing.T) {
 
 	node := testNode("worker-1", testPodCIDR, annotations)
 
-	got, err := peer.BuildPeer("my-mesh", testEntry(), node, nil)
+	got, err := peer.BuildPeer("my-mesh", testEntry(), node, nil, 0)
 
 	require.Error(t, err)
 	assert.Nil(t, got)
@@ -157,32 +157,36 @@ func TestBuildPeer_MissingWireguardIP(t *testing.T) {
 
 	node := testNode("worker-1", testPodCIDR, annotations)
 
-	got, err := peer.BuildPeer("my-mesh", testEntry(), node, nil)
+	got, err := peer.BuildPeer("my-mesh", testEntry(), node, nil, 0)
 
 	require.Error(t, err)
 	assert.Nil(t, got)
 	assert.Contains(t, err.Error(), "no wireguard-ip annotation")
 }
 
-func TestBuildPeer_NoEndpointSources_ReturnsError(t *testing.T) {
+func TestBuildPeer_NoEndpointSources_ProducesRoamingPeer(t *testing.T) {
 	t.Parallel()
 
-	// Node has the wireguard-ip and public-key annotations but no
+	// Fix C: a node with the wireguard-ip and public-key annotations but no
 	// endpoint source (no clustermesh-endpoint, no force-endpoint, no
-	// ExternalIP). The fallback chain in kilonode.ResolveEndpoint
-	// returns no source and BuildPeer surfaces this as a hard error so
-	// that misconfiguration is visible rather than producing an
-	// endpoint-less Peer.
+	// ExternalIP) is NOT an error. BuildPeer emits a "roaming" peer with
+	// Endpoint=nil. A NAT'd tenant node can initiate the handshake outbound to
+	// a public endpoint (Ceph), and the far side learns its address from that
+	// first inbound handshake — so an endpoint-less peer is still useful, and
+	// skipping it would deadlock bootstrap. The node's own routes (pod CIDR and
+	// wireguard-ip /32) must still be present.
 	annotations := baseAnnotations()
 	delete(annotations, kilonode.AnnotationForceEndpoint)
 
 	node := testNode("worker-1", testPodCIDR, annotations)
 
-	got, err := peer.BuildPeer("my-mesh", testEntry(), node, nil)
+	got, err := peer.BuildPeer("my-mesh", testEntry(), node, nil, 0)
 
-	require.Error(t, err)
-	assert.Nil(t, got)
-	assert.Contains(t, err.Error(), "no resolvable endpoint")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Nil(t, got.Spec.Endpoint, "node with no endpoint source must yield a roaming peer (nil endpoint)")
+	assert.Equal(t, testPubKey, got.Spec.PublicKey)
+	assert.Equal(t, []string{testPodCIDR, testWgIP}, got.Spec.AllowedIPs)
 }
 
 func TestBuildPeer_DNSEndpoint(t *testing.T) {
@@ -193,7 +197,7 @@ func TestBuildPeer_DNSEndpoint(t *testing.T) {
 
 	node := testNode("worker-1", testPodCIDR, annotations)
 
-	got, err := peer.BuildPeer("my-mesh", testEntry(), node, nil)
+	got, err := peer.BuildPeer("my-mesh", testEntry(), node, nil, 0)
 
 	require.NoError(t, err)
 	require.NotNil(t, got)
@@ -211,7 +215,7 @@ func TestBuildPeer_IPEndpoint(t *testing.T) {
 
 	node := testNode("worker-1", testPodCIDR, annotations)
 
-	got, err := peer.BuildPeer("my-mesh", testEntry(), node, nil)
+	got, err := peer.BuildPeer("my-mesh", testEntry(), node, nil, 0)
 
 	require.NoError(t, err)
 	require.NotNil(t, got)
@@ -236,7 +240,7 @@ func TestBuildPeer_AnchorExtras_WithServiceCIDR(t *testing.T) {
 
 	node := testNode("worker-1", testPodCIDR, baseAnnotations())
 
-	got, err := peer.BuildPeer("my-mesh", entry, node, peer.CollectAnchorCIDRs(entry, []*corev1.Node{node}))
+	got, err := peer.BuildPeer("my-mesh", entry, node, peer.CollectAnchorCIDRs(entry, []*corev1.Node{node}), 0)
 
 	require.NoError(t, err)
 	require.NotNil(t, got)
@@ -260,7 +264,7 @@ func TestBuildPeer_AnchorExtras_WithAdditionalCIDRs(t *testing.T) {
 
 	node := testNode("worker-1", testPodCIDR, baseAnnotations())
 
-	got, err := peer.BuildPeer("my-mesh", entry, node, peer.CollectAnchorCIDRs(entry, []*corev1.Node{node}))
+	got, err := peer.BuildPeer("my-mesh", entry, node, peer.CollectAnchorCIDRs(entry, []*corev1.Node{node}), 0)
 
 	require.NoError(t, err)
 	require.NotNil(t, got)
@@ -286,7 +290,7 @@ func TestBuildPeer_NoExtras_ProducesNodeOnlyAllowedIPs(t *testing.T) {
 
 	node := testNode("worker-1", testPodCIDR, baseAnnotations())
 
-	got, err := peer.BuildPeer("my-mesh", entry, node, peer.CollectAnchorCIDRs(entry, []*corev1.Node{node}))
+	got, err := peer.BuildPeer("my-mesh", entry, node, peer.CollectAnchorCIDRs(entry, []*corev1.Node{node}), 0)
 
 	require.NoError(t, err)
 	require.NotNil(t, got)
@@ -305,7 +309,7 @@ func TestBuildPeer_MalformedForceEndpoint_ReturnsError(t *testing.T) {
 
 	node := testNode("worker-1", testPodCIDR, annotations)
 
-	got, err := peer.BuildPeer("my-mesh", testEntry(), node, nil)
+	got, err := peer.BuildPeer("my-mesh", testEntry(), node, nil, 0)
 
 	require.Error(t, err)
 	assert.Nil(t, got)
@@ -322,7 +326,7 @@ func TestBuildPeer_ClustermeshEndpointPreferred(t *testing.T) {
 
 	node := testNode("worker-1", testPodCIDR, annotations)
 
-	got, err := peer.BuildPeer("my-mesh", testEntry(), node, nil)
+	got, err := peer.BuildPeer("my-mesh", testEntry(), node, nil, 0)
 
 	require.NoError(t, err)
 	require.NotNil(t, got)
@@ -348,7 +352,7 @@ func TestBuildPeer_ExternalIPFallback(t *testing.T) {
 
 	entry := &v1alpha1.ClusterEntry{Name: "cluster-a", WireguardPort: 51820}
 
-	got, err := peer.BuildPeer("my-mesh", entry, node, nil)
+	got, err := peer.BuildPeer("my-mesh", entry, node, nil, 0)
 
 	require.NoError(t, err)
 	require.NotNil(t, got)
@@ -369,21 +373,21 @@ func TestBuildPeer_MalformedClustermeshEndpoint_ReturnsError(t *testing.T) {
 
 	node := testNode("worker-1", testPodCIDR, annotations)
 
-	got, err := peer.BuildPeer("my-mesh", testEntry(), node, nil)
+	got, err := peer.BuildPeer("my-mesh", testEntry(), node, nil, 0)
 
 	require.Error(t, err)
 	assert.Nil(t, got)
 }
 
-func TestBuildPeer_AnchorExtras_NoEndpointSource_ReturnsError(t *testing.T) {
+func TestBuildPeer_AnchorExtras_NoEndpointSource_ProducesRoamingPeer(t *testing.T) {
 	t.Parallel()
 
-	// Replaces TestBuildAnchorPeer_NoEndpointSource_ReturnsNil. Endpoint
-	// resolution is shared by every node Peer (anchor or not), so the
-	// same "no resolvable endpoint" condition now surfaces as a hard
-	// error from BuildPeer rather than a nil-anchor signal. That is
-	// strictly stricter: the operator surfaces misconfiguration instead
-	// of silently dropping cluster-wide CIDRs.
+	// Fix C applied to the anchor node: a node carrying the cluster-wide
+	// (anchor) CIDRs but with no resolvable endpoint is still peered as a
+	// roaming peer (Endpoint=nil). Dropping it would also drop every anchor
+	// CIDR folded into it, taking down service-CIDR / host-network routing for
+	// the whole source cluster during bootstrap — exactly when the node has no
+	// endpoint yet. The anchor CIDRs must survive into the roaming peer.
 	entry := &v1alpha1.ClusterEntry{
 		Name:            "cluster-a",
 		AllowedNetworks: []string{"10.96.0.0/12"},
@@ -395,10 +399,12 @@ func TestBuildPeer_AnchorExtras_NoEndpointSource_ReturnsError(t *testing.T) {
 	node := testNode("worker-1", testPodCIDR, annotations)
 	node.Status.Addresses = nil
 
-	got, err := peer.BuildPeer("my-mesh", entry, node, peer.CollectAnchorCIDRs(entry, []*corev1.Node{node}))
+	got, err := peer.BuildPeer("my-mesh", entry, node, peer.CollectAnchorCIDRs(entry, []*corev1.Node{node}), 0)
 
-	require.Error(t, err)
-	assert.Nil(t, got, "node Peer without resolvable endpoint must error, regardless of anchor CIDRs")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Nil(t, got.Spec.Endpoint, "anchor node without resolvable endpoint must yield a roaming peer (nil endpoint)")
+	assert.Contains(t, got.Spec.AllowedIPs, "10.96.0.0/12", "anchor CIDRs must survive into the roaming peer")
 }
 
 func TestBuildPeer_AnchorExtras_ExternalIPFallback(t *testing.T) {
@@ -422,7 +428,7 @@ func TestBuildPeer_AnchorExtras_ExternalIPFallback(t *testing.T) {
 		{Type: corev1.NodeExternalIP, Address: "203.0.113.99"},
 	}
 
-	got, err := peer.BuildPeer("my-mesh", entry, node, peer.CollectAnchorCIDRs(entry, []*corev1.Node{node}))
+	got, err := peer.BuildPeer("my-mesh", entry, node, peer.CollectAnchorCIDRs(entry, []*corev1.Node{node}), 0)
 
 	require.NoError(t, err)
 	require.NotNil(t, got)
@@ -443,7 +449,7 @@ func TestBuildPeer_BracketedDNSEndpoint(t *testing.T) {
 
 	node := testNode("worker-1", testPodCIDR, annotations)
 
-	got, err := peer.BuildPeer("my-mesh", testEntry(), node, nil)
+	got, err := peer.BuildPeer("my-mesh", testEntry(), node, nil, 0)
 
 	require.NoError(t, err)
 	require.NotNil(t, got)
@@ -549,9 +555,9 @@ func TestBuildPeer_AdvertisesInternalIPInAllowedNetworks(t *testing.T) {
 	t.Parallel()
 
 	// A host-networked workload (e.g. a Ceph mon) is reachable at the node's
-	// own InternalIP. When the cluster declares the surrounding range in
-	// AllowedNetworks, BuildPeer advertises that address as a /32 host route on
-	// the node's own Peer — the host-IP analogue of the pod CIDR.
+	// own InternalIP. BuildPeer advertises that address as a /32 host route on
+	// the node's own Peer — the host-IP analogue of the pod CIDR. Here the
+	// InternalIP also happens to fall inside AllowedNetworks.
 	entry := &v1alpha1.ClusterEntry{
 		Name:            "nuvolos-ceph",
 		AllowedNetworks: []string{"10.244.0.0/16", "192.168.103.0/24"},
@@ -563,22 +569,25 @@ func TestBuildPeer_AdvertisesInternalIPInAllowedNetworks(t *testing.T) {
 		{Type: corev1.NodeInternalIP, Address: "192.168.103.11"},
 	}
 
-	got, err := peer.BuildPeer("my-mesh", entry, node, nil)
+	got, err := peer.BuildPeer("my-mesh", entry, node, nil, 0)
 
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Contains(t, got.Spec.AllowedIPs, "192.168.103.11/32",
-		"node InternalIP within AllowedNetworks must be advertised as a /32 host route")
+		"node InternalIP must be advertised as a /32 host route")
 }
 
-func TestBuildPeer_SkipsInternalIPOutsideAllowedNetworks(t *testing.T) {
+func TestBuildPeer_AdvertisesInternalIPOutsideAllowedNetworks(t *testing.T) {
 	t.Parallel()
 
-	// The node's InternalIP is not covered by any AllowedNetworks entry (e.g. a
-	// tenant worker's eth0 address that the cluster never declared). BuildPeer
-	// must NOT advertise it — otherwise the operator would leak an undeclared
-	// host address into the Peer, breaking the "nothing outside AllowedNetworks
-	// ends up in a Peer" bound.
+	// Fix A: a host-networked pod (the CephFS CSI nodeplugin, hostNetwork=true)
+	// sends to the Ceph mons with src = the node's own InternalIP. That /32 must
+	// be in the node's own Peer AllowedIPs or WireGuard crypto-routing on the far
+	// side drops the packet (rados ret=-110 mount timeout). The node's own
+	// address is by definition reachable, so it is ALWAYS advertised —
+	// independent of AllowedNetworks. It must NOT be gated on AllowedNetworks,
+	// because declaring the node subnet there would trip the cross-mesh
+	// CIDR-overlap detector.
 	entry := &v1alpha1.ClusterEntry{
 		Name:            "cluster-a",
 		AllowedNetworks: []string{"10.244.0.0/16"},
@@ -590,12 +599,12 @@ func TestBuildPeer_SkipsInternalIPOutsideAllowedNetworks(t *testing.T) {
 		{Type: corev1.NodeInternalIP, Address: "192.0.2.50"},
 	}
 
-	got, err := peer.BuildPeer("my-mesh", entry, node, nil)
+	got, err := peer.BuildPeer("my-mesh", entry, node, nil, 0)
 
 	require.NoError(t, err)
 	require.NotNil(t, got)
-	assert.NotContains(t, got.Spec.AllowedIPs, "192.0.2.50/32",
-		"node InternalIP outside AllowedNetworks must not be advertised")
+	assert.Contains(t, got.Spec.AllowedIPs, "192.0.2.50/32",
+		"node InternalIP must be advertised even when outside AllowedNetworks")
 }
 
 func TestCollectAnchorCIDRs_HostNetCoveredByNodeInternalIP(t *testing.T) {
@@ -621,4 +630,76 @@ func TestCollectAnchorCIDRs_HostNetCoveredByNodeInternalIP(t *testing.T) {
 	got := peer.CollectAnchorCIDRs(entry, []*corev1.Node{node})
 	assert.Empty(t, got,
 		"host-network range with a per-node InternalIP representative must not be anchored")
+}
+
+func TestBuildPeer_DedupesInternalIPMatchingWireguardIP(t *testing.T) {
+	t.Parallel()
+
+	// Fix A dedup: when the node's InternalIP coincides with its wireguard-ip
+	// host IP (or appears twice in Node.Status.Addresses), the /32 host route
+	// must appear exactly once in AllowedIPs. Duplicate AllowedIPs entries are
+	// redundant and would churn the reconciler's equality check.
+	annotations := baseAnnotations()
+	annotations[kilonode.AnnotationWireguardIP] = "10.4.0.1/32"
+
+	node := testNode("worker-1", testPodCIDR, annotations)
+	node.Status.Addresses = []corev1.NodeAddress{
+		// Same address as the wireguard-ip host IP, listed twice.
+		{Type: corev1.NodeInternalIP, Address: "10.4.0.1"},
+		{Type: corev1.NodeInternalIP, Address: "10.4.0.1"},
+	}
+
+	got, err := peer.BuildPeer("my-mesh", testEntry(), node, nil, 0)
+
+	require.NoError(t, err)
+	require.NotNil(t, got)
+
+	count := 0
+
+	for _, ip := range got.Spec.AllowedIPs {
+		if ip == "10.4.0.1/32" {
+			count++
+		}
+	}
+
+	assert.Equal(t, 1, count, "the /32 host route must be deduplicated to a single entry")
+	assert.Equal(t, []string{testPodCIDR, "10.4.0.1/32"}, got.Spec.AllowedIPs)
+}
+
+func TestBuildPeer_MeshKeepaliveApplied(t *testing.T) {
+	t.Parallel()
+
+	// Fix B: the mesh-wide keepalive floor is applied even when the source
+	// entry's own PersistentKeepalive is 0. This is the ceph-side case: the
+	// ceph→tenant peer is built from the tenant's SELF entry (keepalive 0), but
+	// because another entry in the mesh declares keepalive (NAT present), the
+	// mesh-wide value is threaded in so the NAT mapping is refreshed in BOTH
+	// directions and the tunnel does not flap.
+	entry := testEntry() // PersistentKeepalive defaults to 0.
+	node := testNode("worker-1", testPodCIDR, baseAnnotations())
+
+	got, err := peer.BuildPeer("my-mesh", entry, node, nil, 25)
+
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, 25, got.Spec.PersistentKeepalive,
+		"mesh-wide keepalive must apply even when the source entry's own keepalive is 0")
+}
+
+func TestBuildPeer_EntryKeepalivePreferredWhenHigher(t *testing.T) {
+	t.Parallel()
+
+	// The peer keepalive is max(entry, mesh): if the source entry declares a
+	// higher value than the mesh-wide floor, the entry's value wins.
+	entry := testEntry()
+	entry.PersistentKeepalive = 30
+
+	node := testNode("worker-1", testPodCIDR, baseAnnotations())
+
+	got, err := peer.BuildPeer("my-mesh", entry, node, nil, 25)
+
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, 30, got.Spec.PersistentKeepalive,
+		"entry keepalive must win when higher than the mesh-wide floor")
 }

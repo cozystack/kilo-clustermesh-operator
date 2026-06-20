@@ -118,14 +118,18 @@ func TestValidateNode(t *testing.T) {
 			wantSkipped: false,
 		},
 		{
-			name: "no endpoint source skips node",
+			// Fix C: a node with no resolvable endpoint source (no
+			// clustermesh-endpoint, no force-endpoint, no ExternalIP) is NOT
+			// skipped. It is peered as a roaming WireGuard peer (Endpoint=nil)
+			// so a NAT'd tenant node can bootstrap by initiating the handshake
+			// outbound. Skipping it would deadlock bootstrap.
+			name: "no endpoint source does not skip node (roaming peer)",
 			node: makeNode("node-1", []string{"10.0.1.0/24"}, map[string]string{
 				kilonode.AnnotationWireguardIP: "10.4.0.1/32",
 				kilonode.AnnotationPublicKey:   "dGVzdGtleQo=",
 			}),
 			entry:       baseEntry,
-			wantSkipped: true,
-			wantReason:  validation.ReasonNoEndpoint,
+			wantSkipped: false,
 		},
 		{
 			name: "malformed clustermesh-endpoint skips node",

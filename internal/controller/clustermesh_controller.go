@@ -492,9 +492,11 @@ func (r *ClusterMeshReconciler) reconcileAllClusters(ctx context.Context, log *s
 		//     resolve as the cluster settles. Requeue.
 		//   - transientSkipped > 0 — at least one node is in a
 		//     bootstrap-pending skip state (NodeNoWireguardIP /
-		//     NodeNoPublicKey / NodeNoPodCIDR / NodeNoEndpoint). The
-		//     kilo daemon or node controller will write the missing
-		//     annotation shortly. Requeue.
+		//     NodeNoPublicKey / NodeNoPodCIDR). The kilo daemon or node
+		//     controller will write the missing annotation shortly.
+		//     Requeue. (A node with no resolvable endpoint is NOT
+		//     skipped — it is peered as a roaming peer — so it never
+		//     contributes to this count.)
 		//   - all skips are permanent (PodCIDROutOfRange, WGIPInvalid,
 		//     WGIPOutOfRange, WGIPDuplicate, EndpointInvalid) — these
 		//     are configuration / data errors that retry cannot fix.
@@ -599,7 +601,7 @@ func (r *ClusterMeshReconciler) filterNodes(log *slog.Logger, mesh *v1alpha1.Clu
 
 // pushPeersToTargets reconciles peers for srcEntry's nodes into every other cluster.
 func (r *ClusterMeshReconciler) pushPeersToTargets(ctx context.Context, log *slog.Logger, mesh *v1alpha1.ClusterMesh, srcEntry *v1alpha1.ClusterEntry, validNodes []*corev1.Node, status *v1alpha1.ClusterStatus) error {
-	desired, err := buildDesiredPeers(mesh.Name, srcEntry, validNodes)
+	desired, err := buildDesiredPeers(mesh.Name, srcEntry, validNodes, meshPersistentKeepalive(mesh))
 	if err != nil {
 		return errors.Wrapf(err, "building peers for cluster %q", srcEntry.Name)
 	}
@@ -767,7 +769,13 @@ func (r *ClusterMeshReconciler) updateStatus(ctx context.Context, mesh *v1alpha1
 // other, silently losing pod-CIDR or service-CIDR routing in a racy way.
 // Folding the anchor CIDRs into the first node Peer keeps a single WG peer
 // entry per pubkey with the full union of AllowedIPs.
-func buildDesiredPeers(meshName string, entry *v1alpha1.ClusterEntry, nodes []*corev1.Node) ([]*kilov1alpha1.Peer, error) {
+//
+// meshKeepalive is the maximum PersistentKeepalive declared across every entry
+// in the mesh; it is the keepalive floor applied to every peer so that a NAT'd
+// cluster keeps its mapping refreshed in BOTH directions (the ceph-side peer of
+// a tenant node is built from the tenant's SELF entry, whose own keepalive is
+// 0).
+func buildDesiredPeers(meshName string, entry *v1alpha1.ClusterEntry, nodes []*corev1.Node, meshKeepalive int) ([]*kilov1alpha1.Peer, error) {
 	peers := make([]*kilov1alpha1.Peer, 0, len(nodes))
 
 	anchorExtras := peer.CollectAnchorCIDRs(entry, nodes)
@@ -778,7 +786,7 @@ func buildDesiredPeers(meshName string, entry *v1alpha1.ClusterEntry, nodes []*c
 			extras = anchorExtras
 		}
 
-		p, err := peer.BuildPeer(meshName, entry, node, extras)
+		p, err := peer.BuildPeer(meshName, entry, node, extras, meshKeepalive)
 		if err != nil {
 			return nil, errors.Wrapf(err, "building peer for node %q", node.Name)
 		}
@@ -787,6 +795,22 @@ func buildDesiredPeers(meshName string, entry *v1alpha1.ClusterEntry, nodes []*c
 	}
 
 	return peers, nil
+}
+
+// meshPersistentKeepalive returns the maximum PersistentKeepalive declared
+// across every cluster entry in the mesh. When any cluster in the mesh sits
+// behind NAT (and so declares a keepalive), this value is applied as a floor to
+// every peer the mesh builds — including the ceph-side peers derived from a
+// cluster's own entry, whose own keepalive is typically 0 — so the NAT mapping
+// is refreshed in both directions and the tunnel does not flap.
+func meshPersistentKeepalive(mesh *v1alpha1.ClusterMesh) int {
+	keepalive := 0
+
+	for i := range mesh.Spec.Clusters {
+		keepalive = max(keepalive, mesh.Spec.Clusters[i].PersistentKeepalive)
+	}
+
+	return keepalive
 }
 
 // listNodes lists all nodes using the given client.
