@@ -109,7 +109,7 @@ type ClusterMeshReconciler struct {
 func (r *ClusterMeshReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := r.Log.With(slog.String("name", req.Name), slog.String("namespace", req.Namespace))
 
-	incomplete, err := r.reconcile(ctx, log, req)
+	state, err := r.reconcile(ctx, log, req)
 
 	// A NoKindMatchError on a remote cluster's REST mapper survives the
 	// lifetime of cluster.Cluster because the negative discovery entry
@@ -124,32 +124,63 @@ func (r *ClusterMeshReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		restart.RefreshMapperOnNoMatch(err, m, log)
 	}
 
-	return selectResult(incomplete, err)
+	return selectResult(state, err)
 }
 
-// selectResult converts the (incomplete, err) pair from reconcile() into a
+// reconcileState classifies the outcome of a reconcile() so the caller can
+// pick the right requeue cadence. The zero value is reconcileStateDone, so any
+// path that returns without explicitly setting a state schedules no periodic
+// requeue — the safe default for terminal cases whose next meaningful trigger
+// arrives via a watch event rather than a timer.
+type reconcileState int
+
+const (
+	// reconcileStateDone is a terminal reconcile that needs no periodic
+	// requeue: the ClusterMesh no longer exists (NotFound), is being deleted,
+	// just had its finalizer added, or failed mesh-level validation.
+	// Re-running on a timer would only spin no-op reconciles; the relevant
+	// change (a CR edit or a Node event) comes through a watch instead.
+	reconcileStateDone reconcileState = iota
+
+	// reconcileStateBootstrap means the mesh reconciled cleanly but at least
+	// one source cluster is still converging (missing from the registry, or
+	// no valid nodes yet). Requeue fast so the mesh comes up promptly.
+	reconcileStateBootstrap
+
+	// reconcileStateSynced means a live mesh reconciled fully. Arm the slow
+	// periodic resync as a safety net for Node-watch events missed across a
+	// watch reconnect.
+	reconcileStateSynced
+)
+
+// selectResult converts the (state, err) pair from reconcile() into a
 // ctrl.Result suitable for controller-runtime. Extracted so the requeue
 // selection logic can be unit-tested without a full envtest setup.
 //
-// Three cases:
+// Cases:
 //   - err != nil: return zero result so controller-runtime applies its
 //     own exponential backoff via the rate limiter (mixing RequeueAfter
 //     with an error would defeat the backoff).
-//   - incomplete: fast requeue (bootstrapRequeueAfter = 30 s) while the
-//     mesh is still converging.
-//   - fully converged: slow periodic resync (syncRequeueAfter = 5 m) so
-//     new nodes in source clusters get a Peer without waiting for a CR
-//     event.
-func selectResult(incomplete bool, err error) (ctrl.Result, error) {
+//   - reconcileStateBootstrap: fast requeue (bootstrapRequeueAfter = 30 s)
+//     while the mesh is still converging.
+//   - reconcileStateSynced: slow periodic resync (syncRequeueAfter = 5 m) so
+//     new nodes in source clusters get a Peer without waiting for a CR event.
+//   - reconcileStateDone: zero result, no requeue — the mesh is gone or
+//     terminal and a timer would only schedule no-op reconciles.
+func selectResult(state reconcileState, err error) (ctrl.Result, error) {
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
-	if incomplete {
+	if state == reconcileStateBootstrap {
 		return ctrl.Result{RequeueAfter: bootstrapRequeueAfter}, nil
 	}
 
-	return ctrl.Result{RequeueAfter: syncRequeueAfter}, nil
+	if state == reconcileStateSynced {
+		return ctrl.Result{RequeueAfter: syncRequeueAfter}, nil
+	}
+
+	return ctrl.Result{}, nil
 }
 
 // SetupWithManager registers the controller with the manager.
@@ -227,22 +258,23 @@ func (r *ClusterMeshReconciler) nodeToClusterMeshRequests(clusterName string) ha
 	}
 }
 
-// reconcile is the body of Reconcile. The bool return is true when the
-// reconcile completed without error but at least one source cluster was
-// still bootstrapping (missing from the registry, or no nodes yet); the
-// caller translates that into a RequeueAfter so the controller does not
-// stall waiting for an external event on the ClusterMesh CR.
-func (r *ClusterMeshReconciler) reconcile(ctx context.Context, log *slog.Logger, req ctrl.Request) (bool, error) {
+// reconcile is the body of Reconcile. It returns the reconcileState the caller
+// maps to a requeue cadence: reconcileStateBootstrap when at least one source
+// cluster is still converging (missing from the registry, or no valid nodes
+// yet), reconcileStateSynced for a fully reconciled live mesh, and
+// reconcileStateDone for terminal paths (the mesh is gone, being deleted, just
+// had its finalizer added, or failed validation) that need no periodic requeue.
+func (r *ClusterMeshReconciler) reconcile(ctx context.Context, log *slog.Logger, req ctrl.Request) (reconcileState, error) {
 	mesh := &v1alpha1.ClusterMesh{}
 
 	err := r.Get(ctx, req.NamespacedName, mesh)
 	if err != nil {
-		return false, errors.Wrap(client.IgnoreNotFound(err), "fetching ClusterMesh")
+		return reconcileStateDone, errors.Wrap(client.IgnoreNotFound(err), "fetching ClusterMesh")
 	}
 
 	// Handle deletion via finalizer.
 	if !mesh.DeletionTimestamp.IsZero() {
-		return false, r.handleDeletion(ctx, log, mesh)
+		return reconcileStateDone, r.handleDeletion(ctx, log, mesh)
 	}
 
 	// Ensure finalizer is present.
@@ -251,15 +283,15 @@ func (r *ClusterMeshReconciler) reconcile(ctx context.Context, log *slog.Logger,
 
 		err = r.Update(ctx, mesh)
 		if err != nil {
-			return false, errors.Wrap(err, "adding finalizer")
+			return reconcileStateDone, errors.Wrap(err, "adding finalizer")
 		}
 
-		return false, nil
+		return reconcileStateDone, nil
 	}
 
 	// Mesh-level validation.
 	if overlap, msg := r.validateMeshNetworks(ctx, log, mesh); overlap {
-		return false, r.setOverlapCondition(ctx, mesh, msg)
+		return reconcileStateDone, r.setOverlapCondition(ctx, mesh, msg)
 	}
 
 	setCondition(mesh, "NetworksOverlap", metav1.ConditionFalse, "NoOverlap", "all CIDRs are disjoint")
@@ -267,7 +299,7 @@ func (r *ClusterMeshReconciler) reconcile(ctx context.Context, log *slog.Logger,
 	// Reconcile per-cluster peers.
 	clusterStatuses, incomplete, err := r.reconcileAllClusters(ctx, log, mesh)
 	if err != nil {
-		return false, err
+		return reconcileStateDone, err
 	}
 
 	// Sweep peers whose source-cluster was removed from spec.Clusters since
@@ -284,7 +316,12 @@ func (r *ClusterMeshReconciler) reconcile(ctx context.Context, log *slog.Logger,
 	// the global cleanup pass so the cluster always converges.
 	r.cleanupOrphanMeshPeers(ctx, log, mesh.Namespace)
 
-	return incomplete, r.updateStatus(ctx, mesh, clusterStatuses)
+	state := reconcileStateSynced
+	if incomplete {
+		state = reconcileStateBootstrap
+	}
+
+	return state, r.updateStatus(ctx, mesh, clusterStatuses)
 }
 
 // cleanupSweepTimeout caps the per-target list/delete pass time so a single

@@ -32,30 +32,37 @@ func TestSelectResult(t *testing.T) {
 
 	tests := []struct {
 		name             string
-		incomplete       bool
+		state            reconcileState
 		err              error
 		wantRequeueAfter time.Duration
 		wantErr          bool
 	}{
 		{
 			name:             "error disables RequeueAfter so rate-limiter backoff applies",
-			incomplete:       false,
+			state:            reconcileStateSynced,
 			err:              errSentinel,
 			wantRequeueAfter: time.Duration(0), // zero — let controller-runtime backoff
 			wantErr:          true,
 		},
 		{
-			name:             "incomplete triggers fast bootstrap requeue",
-			incomplete:       true,
+			name:             "bootstrap triggers fast requeue",
+			state:            reconcileStateBootstrap,
 			err:              nil,
 			wantRequeueAfter: bootstrapRequeueAfter,
 			wantErr:          false,
 		},
 		{
-			name:             "fully converged triggers slow periodic sync",
-			incomplete:       false,
+			name:             "synced triggers slow periodic resync",
+			state:            reconcileStateSynced,
 			err:              nil,
 			wantRequeueAfter: syncRequeueAfter,
+			wantErr:          false,
+		},
+		{
+			name:             "done schedules no requeue for deleted/NotFound mesh",
+			state:            reconcileStateDone,
+			err:              nil,
+			wantRequeueAfter: time.Duration(0), // zero — no periodic no-op reconciles
 			wantErr:          false,
 		},
 	}
@@ -64,7 +71,7 @@ func TestSelectResult(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			result, err := selectResult(tc.incomplete, tc.err)
+			result, err := selectResult(tc.state, tc.err)
 
 			if tc.wantErr {
 				require.Error(t, err)
