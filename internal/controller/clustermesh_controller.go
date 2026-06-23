@@ -195,7 +195,9 @@ func (r *ClusterMeshReconciler) SetupWithManager(mgr ctrl.Manager) error {
 func (r *ClusterMeshReconciler) nodeToClusterMeshRequests(clusterName string) handler.TypedMapFunc[*corev1.Node, reconcile.Request] {
 	return func(ctx context.Context, _ *corev1.Node) []reconcile.Request {
 		meshList := &v1alpha1.ClusterMeshList{}
-		if err := r.List(ctx, meshList); err != nil {
+
+		err := r.List(ctx, meshList)
+		if err != nil {
 			r.Log.Error("listing ClusterMeshes for node event",
 				slog.String("cluster", clusterName),
 				slog.String("error", err.Error()),
@@ -206,13 +208,13 @@ func (r *ClusterMeshReconciler) nodeToClusterMeshRequests(clusterName string) ha
 
 		var reqs []reconcile.Request
 
-		for _, mesh := range meshList.Items {
-			for _, entry := range mesh.Spec.Clusters {
+		for i := range meshList.Items {
+			for _, entry := range meshList.Items[i].Spec.Clusters {
 				if entry.Name == clusterName {
 					reqs = append(reqs, reconcile.Request{
 						NamespacedName: types.NamespacedName{
-							Name:      mesh.Name,
-							Namespace: mesh.Namespace,
+							Name:      meshList.Items[i].Name,
+							Namespace: meshList.Items[i].Namespace,
 						},
 					})
 
