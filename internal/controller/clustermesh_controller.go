@@ -196,6 +196,11 @@ func (r *ClusterMeshReconciler) nodeToClusterMeshRequests(clusterName string) ha
 	return func(ctx context.Context, _ *corev1.Node) []reconcile.Request {
 		meshList := &v1alpha1.ClusterMeshList{}
 		if err := r.List(ctx, meshList); err != nil {
+			r.Log.Error("listing ClusterMeshes for node event",
+				slog.String("cluster", clusterName),
+				slog.String("error", err.Error()),
+			)
+
 			return nil
 		}
 
