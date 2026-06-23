@@ -122,25 +122,30 @@ func (r *ClusterMeshReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		restart.RefreshMapperOnNoMatch(err, m, log)
 	}
 
-	// Schedule a periodic retry. On error we leave RequeueAfter zero so
-	// controller-runtime applies its own exponential backoff via the rate
-	// limiter; mixing RequeueAfter with an error would defeat the backoff.
-	//
-	// Two intervals:
-	//   - bootstrapRequeueAfter (30 s): while at least one source cluster
-	//     is still bootstrapping — fast convergence during initial setup.
-	//   - syncRequeueAfter (5 m): once everything is healthy — periodic
-	//     sweep that picks up new nodes added to source clusters (no CR
-	//     event fires when a remote node joins, so without this the new
-	//     node would never get a Peer object).
-	if err == nil {
-		if incomplete {
-			return ctrl.Result{RequeueAfter: bootstrapRequeueAfter}, nil
-		}
-		return ctrl.Result{RequeueAfter: syncRequeueAfter}, nil
-	}
+	return selectResult(incomplete, err)
+}
 
-	return ctrl.Result{}, err
+// selectResult converts the (incomplete, err) pair from reconcile() into a
+// ctrl.Result suitable for controller-runtime. Extracted so the requeue
+// selection logic can be unit-tested without a full envtest setup.
+//
+// Three cases:
+//   - err != nil: return zero result so controller-runtime applies its
+//     own exponential backoff via the rate limiter (mixing RequeueAfter
+//     with an error would defeat the backoff).
+//   - incomplete: fast requeue (bootstrapRequeueAfter = 30 s) while the
+//     mesh is still converging.
+//   - fully converged: slow periodic resync (syncRequeueAfter = 5 m) so
+//     new nodes in source clusters get a Peer without waiting for a CR
+//     event.
+func selectResult(incomplete bool, err error) (ctrl.Result, error) {
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if incomplete {
+		return ctrl.Result{RequeueAfter: bootstrapRequeueAfter}, nil
+	}
+	return ctrl.Result{RequeueAfter: syncRequeueAfter}, nil
 }
 
 // SetupWithManager registers the controller with the manager.
