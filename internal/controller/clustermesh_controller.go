@@ -142,9 +142,11 @@ func selectResult(incomplete bool, err error) (ctrl.Result, error) {
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+
 	if incomplete {
 		return ctrl.Result{RequeueAfter: bootstrapRequeueAfter}, nil
 	}
+
 	return ctrl.Result{RequeueAfter: syncRequeueAfter}, nil
 }
 

@@ -17,18 +17,18 @@ limitations under the License.
 package controller
 
 import (
-	"errors"
 	"testing"
 	"time"
 
+	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
+var errSentinel = errors.New("reconcile failed")
+
 func TestSelectResult(t *testing.T) {
 	t.Parallel()
-
-	sentinel := errors.New("reconcile failed")
 
 	tests := []struct {
 		name             string
@@ -40,7 +40,7 @@ func TestSelectResult(t *testing.T) {
 		{
 			name:             "error disables RequeueAfter so rate-limiter backoff applies",
 			incomplete:       false,
-			err:              sentinel,
+			err:              errSentinel,
 			wantRequeueAfter: time.Duration(0), // zero — let controller-runtime backoff
 			wantErr:          true,
 		},
@@ -68,7 +68,7 @@ func TestSelectResult(t *testing.T) {
 
 			if tc.wantErr {
 				require.Error(t, err)
-				assert.ErrorIs(t, err, sentinel)
+				assert.ErrorIs(t, err, errSentinel)
 			} else {
 				require.NoError(t, err)
 			}
