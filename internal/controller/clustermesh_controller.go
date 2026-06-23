@@ -71,6 +71,19 @@ const finalizerName = "kilo-clustermesh.io/cleanup"
 // belt-and-braces against this race.
 const bootstrapRequeueAfter = 30 * time.Second
 
+// syncRequeueAfter is the interval at which a fully-converged mesh is
+// re-reconciled even when no ClusterMesh CR event has fired. This covers
+// the node scale-out case: when a new worker node joins a source cluster
+// the ClusterMesh CR itself does not change, so the controller gets no
+// watch event. Without this period the new node never receives a Peer
+// object, and any CSI driver or workload running hostNetwork=true on that
+// node cannot reach the remote cluster (observed as ceph-csi-cephfs mount
+// failures with "no mds up" until a manual annotation-based reconcile was
+// triggered). Five minutes is a reasonable upper bound for the worst-case
+// delay: node joins → kilo daemon annotates → next sync window → Peer
+// created → WireGuard tunnel up → CSI mount succeeds.
+const syncRequeueAfter = 5 * time.Minute
+
 // +kubebuilder:rbac:groups=kilo.squat.ai,resources=clustermeshes,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=kilo.squat.ai,resources=clustermeshes/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=kilo.squat.ai,resources=clustermeshes/finalizers,verbs=update
@@ -109,13 +122,22 @@ func (r *ClusterMeshReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		restart.RefreshMapperOnNoMatch(err, m, log)
 	}
 
-	// Schedule a periodic retry while any source cluster is still
-	// bootstrapping. On error we leave RequeueAfter zero so
-	// controller-runtime applies its own exponential backoff via the
-	// rate limiter; mixing RequeueAfter with an error would defeat the
-	// backoff.
-	if err == nil && incomplete {
-		return ctrl.Result{RequeueAfter: bootstrapRequeueAfter}, nil
+	// Schedule a periodic retry. On error we leave RequeueAfter zero so
+	// controller-runtime applies its own exponential backoff via the rate
+	// limiter; mixing RequeueAfter with an error would defeat the backoff.
+	//
+	// Two intervals:
+	//   - bootstrapRequeueAfter (30 s): while at least one source cluster
+	//     is still bootstrapping — fast convergence during initial setup.
+	//   - syncRequeueAfter (5 m): once everything is healthy — periodic
+	//     sweep that picks up new nodes added to source clusters (no CR
+	//     event fires when a remote node joins, so without this the new
+	//     node would never get a Peer object).
+	if err == nil {
+		if incomplete {
+			return ctrl.Result{RequeueAfter: bootstrapRequeueAfter}, nil
+		}
+		return ctrl.Result{RequeueAfter: syncRequeueAfter}, nil
 	}
 
 	return ctrl.Result{}, err
