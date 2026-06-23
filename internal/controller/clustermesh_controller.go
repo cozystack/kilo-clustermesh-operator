@@ -79,10 +79,12 @@ const bootstrapRequeueAfter = 30 * time.Second
 // object, and any CSI driver or workload running hostNetwork=true on that
 // node cannot reach the remote cluster (observed as ceph-csi-cephfs mount
 // failures with "no mds up" until a manual annotation-based reconcile was
-// triggered). Five minutes is a reasonable upper bound for the worst-case
-// delay: node joins → kilo daemon annotates → next sync window → Peer
-// created → WireGuard tunnel up → CSI mount succeeds.
-const syncRequeueAfter = 5 * time.Minute
+// triggered). One minute bounds the worst-case delay: node joins → kilo
+// daemon annotates → next sync window → Peer created → WireGuard tunnel
+// up → CSI mount succeeds. After the first sync tick the kilo daemon may
+// not have written annotations yet (transient skip), which arms the faster
+// bootstrapRequeueAfter (30 s) loop, so the total lag is at most ~1.5 min.
+const syncRequeueAfter = 1 * time.Minute
 
 // +kubebuilder:rbac:groups=kilo.squat.ai,resources=clustermeshes,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=kilo.squat.ai,resources=clustermeshes/status,verbs=get;update;patch
