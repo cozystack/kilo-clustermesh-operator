@@ -34,7 +34,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
+
+	"k8s.io/apimachinery/pkg/types"
 
 	v1alpha1 "github.com/squat/kilo-clustermesh-operator/api/v1alpha1"
 	"github.com/squat/kilo-clustermesh-operator/internal/kilonode"
@@ -71,20 +76,15 @@ const finalizerName = "kilo-clustermesh.io/cleanup"
 // belt-and-braces against this race.
 const bootstrapRequeueAfter = 30 * time.Second
 
-// syncRequeueAfter is the interval at which a fully-converged mesh is
-// re-reconciled even when no ClusterMesh CR event has fired. This covers
-// the node scale-out case: when a new worker node joins a source cluster
-// the ClusterMesh CR itself does not change, so the controller gets no
-// watch event. Without this period the new node never receives a Peer
-// object, and any CSI driver or workload running hostNetwork=true on that
-// node cannot reach the remote cluster (observed as ceph-csi-cephfs mount
-// failures with "no mds up" until a manual annotation-based reconcile was
-// triggered). One minute bounds the worst-case delay: node joins → kilo
-// daemon annotates → next sync window → Peer created → WireGuard tunnel
-// up → CSI mount succeeds. After the first sync tick the kilo daemon may
-// not have written annotations yet (transient skip), which arms the faster
-// bootstrapRequeueAfter (30 s) loop, so the total lag is at most ~1.5 min.
-const syncRequeueAfter = 1 * time.Minute
+// syncRequeueAfter is a safety-net full resync interval for fully-converged
+// meshes. Node Add/Update events from source clusters are delivered
+// immediately via the per-cluster Node watch registered in SetupWithManager,
+// so this periodic tick is not the primary trigger for new-node detection.
+// It exists purely as a fallback: if a watch reconnects after a temporary
+// API-server hiatus, a missed Add event would leave a node without a Peer
+// until the next CR update. Five minutes is acceptable here because the
+// watch path handles the common case with zero delay.
+const syncRequeueAfter = 5 * time.Minute
 
 // +kubebuilder:rbac:groups=kilo.squat.ai,resources=clustermeshes,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=kilo.squat.ai,resources=clustermeshes/status,verbs=get;update;patch
@@ -153,16 +153,71 @@ func selectResult(incomplete bool, err error) (ctrl.Result, error) {
 }
 
 // SetupWithManager registers the controller with the manager.
+//
+// In addition to the ClusterMesh CR watch, it sets up a Node watch for every
+// source cluster in the registry. When a node is added to or removed from a
+// source cluster, the operator must create or delete the corresponding Peer
+// objects — but the ClusterMesh CR itself does not change on node events, so
+// the controller would otherwise never know. The Node watch provides the
+// missing trigger: any node change in a source cluster immediately enqueues
+// every ClusterMesh that references that cluster.
 func (r *ClusterMeshReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	err := ctrl.NewControllerManagedBy(mgr).
+	blder := ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.ClusterMesh{}).
 		Named("clustermesh").
 		WithEventFilter(predicate.Funcs{
 			DeleteFunc: func(event.DeleteEvent) bool { return false },
-		}).
-		Complete(r)
+		})
 
-	return errors.Wrap(err, "building clustermesh controller")
+	for clusterName, c := range r.Registry.All() {
+		blder = blder.WatchesRawSource(
+			source.Kind(
+				c.GetCache(),
+				&corev1.Node{},
+				handler.TypedEnqueueRequestsFromMapFunc[*corev1.Node](r.nodeToClusterMeshRequests(clusterName)),
+				// Only react to structural node changes (Ready condition, kilo
+				// annotations). Suppress events that don't affect peering.
+				predicate.Or(
+					predicate.TypedGenerationChangedPredicate[*corev1.Node]{},
+					predicate.TypedAnnotationChangedPredicate[*corev1.Node]{},
+				),
+			),
+		)
+	}
+
+	return errors.Wrap(blder.Complete(r), "building clustermesh controller")
+}
+
+// nodeToClusterMeshRequests returns a MapFunc that, given a Node event in
+// clusterName, enqueues every ClusterMesh that lists clusterName in its
+// spec.clusters. Called by the per-cluster Node watch registered in
+// SetupWithManager.
+func (r *ClusterMeshReconciler) nodeToClusterMeshRequests(clusterName string) handler.TypedMapFunc[*corev1.Node, reconcile.Request] {
+	return func(ctx context.Context, _ *corev1.Node) []reconcile.Request {
+		meshList := &v1alpha1.ClusterMeshList{}
+		if err := r.List(ctx, meshList); err != nil {
+			return nil
+		}
+
+		var reqs []reconcile.Request
+
+		for _, mesh := range meshList.Items {
+			for _, entry := range mesh.Spec.Clusters {
+				if entry.Name == clusterName {
+					reqs = append(reqs, reconcile.Request{
+						NamespacedName: types.NamespacedName{
+							Name:      mesh.Name,
+							Namespace: mesh.Namespace,
+						},
+					})
+
+					break
+				}
+			}
+		}
+
+		return reqs
+	}
 }
 
 // reconcile is the body of Reconcile. The bool return is true when the
