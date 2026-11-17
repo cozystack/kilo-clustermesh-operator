@@ -109,3 +109,44 @@ func TestBuildDesiredPeers_CephSidePeerInheritsMeshKeepalive(t *testing.T) {
 	assert.Equal(t, 25, peers[0].Spec.PersistentKeepalive,
 		"ceph-side peer derived from the tenant SELF entry (PK=0) must still get the mesh-wide PK=25")
 }
+
+// The anchor (the Peer that carries declared CIDRs no node covers) must be the
+// same regardless of the order listNodes returns the nodes in. The informer
+// cache's List iterates a Go map, so without sorting the anchor would flip and
+// the uncovered CIDR would bounce between peers on every reconcile.
+func TestBuildDesiredPeers_AnchorStableAcrossNodeOrder(t *testing.T) {
+	t.Parallel()
+
+	// 10.96.0.0/12 is covered by no node, so it is folded into the anchor.
+	entry := &v1alpha1.ClusterEntry{
+		Name:            "tenant",
+		AllowedNetworks: []string{"10.244.0.0/16", "10.4.0.0/16", "10.96.0.0/12"},
+	}
+
+	const anchorCIDR = "10.96.0.0/12"
+
+	nodeA := keepaliveTestNode("node-a")
+	nodeB := keepaliveTestNode("node-b")
+	nodeB.Annotations[kilonode.AnnotationWireguardIP] = "10.4.0.2/32"
+	nodeB.Spec.PodCIDRs = []string{"10.244.2.0/24"}
+
+	for _, order := range [][]*corev1.Node{{nodeA, nodeB}, {nodeB, nodeA}} {
+		peers, err := buildDesiredPeers("mesh", entry, order, 0)
+		require.NoError(t, err)
+		require.Len(t, peers, 2)
+
+		var carriers []string
+
+		for _, p := range peers {
+			for _, cidr := range p.Spec.AllowedIPs {
+				if cidr == anchorCIDR {
+					carriers = append(carriers, p.Name)
+				}
+			}
+		}
+
+		require.Len(t, carriers, 1, "exactly one peer must carry the uncovered CIDR")
+		assert.Contains(t, carriers[0], "node-a",
+			"the uncovered CIDR must always land on the lowest-name node regardless of input order")
+	}
+}

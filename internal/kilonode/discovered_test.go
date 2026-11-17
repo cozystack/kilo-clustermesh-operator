@@ -108,13 +108,14 @@ func TestDiscoveredEndpointsByKey(t *testing.T) {
 			want:  map[string]string{},
 		},
 		{
-			// Multiple nodes observing the same key report the same NAT egress
-			// (the documented invariant), so the deduplicated result is stable
-			// regardless of which node the fake client lists first.
-			name: "same key observed by multiple nodes deduplicates to one entry",
+			// When nodes report different endpoints for the same key, the
+			// name-sorted first node (n1) wins deterministically.
+			// TestDiscoveredEndpointsFromNodes_DeterministicAcrossOrder covers
+			// both list orders directly.
+			name: "same key with differing endpoints resolves to the lowest-name node",
 			nodes: []*corev1.Node{
 				nodeWithDiscovered("n1", `{"`+pubKeyA+`":{"IP":"203.0.113.7","Port":51820}}`),
-				nodeWithDiscovered("n2", `{"`+pubKeyA+`":{"IP":"203.0.113.7","Port":51820}}`),
+				nodeWithDiscovered("n2", `{"`+pubKeyA+`":{"IP":"203.0.113.8","Port":51820}}`),
 			},
 			want: map[string]string{pubKeyA: "203.0.113.7:51820"},
 		},

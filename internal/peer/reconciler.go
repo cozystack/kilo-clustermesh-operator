@@ -141,11 +141,34 @@ func reconcileDesired(
 			continue
 		}
 
-		if peerSpecEqual(existingPeer.Spec, desiredPeer.Spec) {
+		// Preserve a previously resolved endpoint when the desired spec has
+		// none and the peer is still the same machine (same public key). A
+		// node's endpoint resolves to nil during its bring-up window, before
+		// its ExternalIP / force-endpoint annotation lands; overwriting a known
+		// endpoint with nil then tears the WireGuard endpoint down and churns
+		// the peer. Keep the last known-good endpoint instead.
+		//
+		// This is a hint field only: for a NAT'd peer Kilo uses the discovered
+		// endpoint regardless. It is kept with no expiry, so guard on the public
+		// key, otherwise a node rebuilt under the same name with a fresh key but
+		// no endpoint yet would inherit the old machine's address. A genuine
+		// roaming peer starts with no endpoint and so has nothing to preserve.
+		//
+		// Work on a copy of the spec: desiredPeer is shared across all target
+		// clusters (built once per source), so mutating it here would leak one
+		// target's endpoint into the next target's Peer.
+		newSpec := desiredPeer.Spec
+		if newSpec.Endpoint == nil &&
+			existingPeer.Spec.Endpoint != nil &&
+			existingPeer.Spec.PublicKey == newSpec.PublicKey {
+			newSpec.Endpoint = existingPeer.Spec.Endpoint
+		}
+
+		if peerSpecEqual(existingPeer.Spec, newSpec) {
 			continue
 		}
 
-		existingPeer.Spec = desiredPeer.Spec
+		existingPeer.Spec = newSpec
 
 		err := remoteClient.Update(ctx, existingPeer)
 		if err != nil {

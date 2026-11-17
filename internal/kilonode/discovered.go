@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"sort"
 	"strconv"
 
 	"github.com/cockroachdb/errors"
@@ -62,10 +63,29 @@ func DiscoveredEndpointsByKey(ctx context.Context, kubeClient client.Client) (ma
 		return nil, errors.Wrap(err, "listing nodes for discovered-endpoint lookup")
 	}
 
+	return discoveredEndpointsFromNodes(nodeList.Items), nil
+}
+
+// discoveredEndpointsFromNodes builds the public-key to "host:port" map from the
+// discovered-endpoints annotation of each node. Nodes are visited in name order
+// so the first-occurrence-wins choice is deterministic: the informer cache's
+// List iterates a Go map, so an unsorted order would make the chosen endpoint
+// jump between reconciles when two nodes report different endpoints for the same
+// key (e.g. different observed NAT ports). The input slice is not mutated.
+func discoveredEndpointsFromNodes(nodes []corev1.Node) map[string]string {
 	result := make(map[string]string)
 
-	for i := range nodeList.Items {
-		raw, ok := nodeList.Items[i].Annotations[AnnotationDiscoveredEndpoints]
+	order := make([]int, len(nodes))
+	for i := range order {
+		order[i] = i
+	}
+
+	sort.Slice(order, func(i, j int) bool {
+		return nodes[order[i]].Name < nodes[order[j]].Name
+	})
+
+	for _, idx := range order {
+		raw, ok := nodes[idx].Annotations[AnnotationDiscoveredEndpoints]
 		if !ok || raw == "" {
 			continue
 		}
@@ -74,7 +94,7 @@ func DiscoveredEndpointsByKey(ctx context.Context, kubeClient client.Client) (ma
 
 		unmarshalErr := json.Unmarshal([]byte(raw), &entries)
 		if unmarshalErr != nil {
-			// Malformed annotation — skip this node silently.
+			// Malformed annotation: skip this node silently.
 			continue
 		}
 
@@ -88,14 +108,14 @@ func DiscoveredEndpointsByKey(ctx context.Context, kubeClient client.Client) (ma
 				continue
 			}
 
-			// First occurrence wins; all nodes that observed a handshake with
-			// the same key should have seen the same source IP (the peer's NAT
-			// egress), so any entry is equally authoritative.
+			// First occurrence wins. Nodes usually agree on a key's NAT egress,
+			// but when they differ the name-sorted order above makes the winner
+			// deterministic instead of depending on List order.
 			if _, seen := result[pubKey]; !seen {
 				result[pubKey] = net.JoinHostPort(entry.IP, strconv.Itoa(entry.Port))
 			}
 		}
 	}
 
-	return result, nil
+	return result
 }
