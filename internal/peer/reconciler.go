@@ -142,11 +142,15 @@ func reconcileDesired(
 		}
 
 		// Preserve a previously resolved endpoint when the desired spec has
-		// none and the peer is still the same machine (same public key). A
-		// node's endpoint resolves to nil during its bring-up window, before
-		// its ExternalIP / force-endpoint annotation lands; overwriting a known
-		// endpoint with nil then tears the WireGuard endpoint down and churns
-		// the peer. Keep the last known-good endpoint instead.
+		// none and the peer is still the same machine (same public key). This
+		// only applies to an already-published Peer: a node joining the mesh
+		// has no Peer yet, so there is nothing to preserve. The desired
+		// endpoint turns nil for an established node when neither its
+		// annotations nor its ExternalIP resolve any more and the target's
+		// discovered-endpoints enrichment finds nothing for its key;
+		// overwriting the known endpoint with nil then tears the WireGuard
+		// endpoint down and churns the peer. Keep the last known-good endpoint
+		// instead.
 		//
 		// This is a hint field only: for a NAT'd peer Kilo uses the discovered
 		// endpoint regardless. It is kept with no expiry, so guard on the public
