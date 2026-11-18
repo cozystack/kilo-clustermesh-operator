@@ -18,6 +18,7 @@ package validation
 
 import (
 	"fmt"
+	"sort"
 
 	corev1 "k8s.io/api/core/v1"
 
@@ -218,11 +219,29 @@ func validateEndpoint(node *corev1.Node, entry *v1alpha1.ClusterEntry) (bool, No
 // If an annotation cannot be parsed as a CIDR, the raw string is used as the
 // dedup key so that identical-invalid copies are still caught, but an invalid
 // annotation never collides with a valid one.
+//
+// The winner of a collision is pinned to the alphabetically lowest node name:
+// callers pass nodes in informer-cache map order, which is non-deterministic,
+// so without a stable tie-break the "duplicate" designation would flip between
+// reconciles and churn the losing node's Peer (deleted now, recreated next
+// reconcile). Nodes are iterated in a name-sorted index so the lowest-name node
+// keeps the WireGuard IP; the input slice is not mutated.
 func FindDuplicateWGIPs(nodes []*corev1.Node) map[string]NodeSkipReason {
+	order := make([]int, len(nodes))
+	for i := range nodes {
+		order[i] = i
+	}
+
+	sort.Slice(order, func(i, j int) bool {
+		return nodes[order[i]].Name < nodes[order[j]].Name
+	})
+
 	seen := make(map[string]string) // normalized host IP (or raw string) → first node name
 	duplicates := make(map[string]NodeSkipReason)
 
-	for _, node := range nodes {
+	for _, idx := range order {
+		node := nodes[idx]
+
 		wgIP, ok := node.Annotations[kilonode.AnnotationWireguardIP]
 		if !ok || wgIP == "" {
 			continue

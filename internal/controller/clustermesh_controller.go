@@ -611,7 +611,7 @@ func (r *ClusterMeshReconciler) reconcileAllClusters(ctx context.Context, log *s
 			return nil, false, errors.Wrapf(err, "listing nodes for cluster %q", srcEntry.Name)
 		}
 
-		validNodes, skipped, transientSkipped := r.filterNodes(log, mesh, nodes, srcEntry)
+		validNodes, retainedNodes, skipped, transientSkipped := r.filterNodes(log, mesh, nodes, srcEntry)
 		status := v1alpha1.ClusterStatus{Name: srcEntry.Name, SkippedNodes: skipped}
 
 		// Source has no nodes that pass validateNode. Decide whether
@@ -663,7 +663,7 @@ func (r *ClusterMeshReconciler) reconcileAllClusters(ctx context.Context, log *s
 			)
 		}
 
-		err = r.pushPeersToTargets(ctx, log, mesh, srcEntry, validNodes, &status)
+		err = r.pushPeersToTargets(ctx, log, mesh, srcEntry, validNodes, retainedNodes, &status)
 		if err != nil {
 			return nil, false, err
 		}
@@ -674,12 +674,15 @@ func (r *ClusterMeshReconciler) reconcileAllClusters(ctx context.Context, log *s
 	return statuses, incomplete, nil
 }
 
-// filterNodes validates nodes and returns valid nodes, the total count
-// of skipped ones, and how many of those skips are transient (i.e.
-// expected to resolve as the kilo daemon / kubelet finishes bootstrap;
-// see validation.IsTransient). The caller uses transientSkipped to
-// decide whether scheduling a periodic requeue would do any good.
-func (r *ClusterMeshReconciler) filterNodes(log *slog.Logger, mesh *v1alpha1.ClusterMesh, nodes []corev1.Node, entry *v1alpha1.ClusterEntry) ([]*corev1.Node, int, int) {
+// filterNodes validates nodes and returns, in order: the valid nodes; the
+// names of nodes skipped for a WireGuard-IP collision (handed to
+// ReconcilePeers so their existing Peer is retained through a transient
+// collision rather than orphan-deleted); the total count of skipped nodes;
+// and how many of those skips are transient (i.e. expected to resolve as the
+// kilo daemon / kubelet finishes bootstrap; see validation.IsTransient). The
+// caller uses transientSkipped to decide whether scheduling a periodic requeue
+// would do any good.
+func (r *ClusterMeshReconciler) filterNodes(log *slog.Logger, mesh *v1alpha1.ClusterMesh, nodes []corev1.Node, entry *v1alpha1.ClusterEntry) ([]*corev1.Node, []string, int, int) {
 	skipped := 0
 	transientSkipped := 0
 	ptrs := make([]*corev1.Node, 0, len(nodes))
@@ -690,6 +693,7 @@ func (r *ClusterMeshReconciler) filterNodes(log *slog.Logger, mesh *v1alpha1.Clu
 
 	duplicates := validation.FindDuplicateWGIPs(ptrs)
 	valid := make([]*corev1.Node, 0, len(ptrs))
+	wgIPDuplicateNodes := make([]string, 0, len(duplicates))
 
 	for _, node := range ptrs {
 		if reason, isDup := duplicates[node.Name]; isDup {
@@ -699,9 +703,16 @@ func (r *ClusterMeshReconciler) filterNodes(log *slog.Logger, mesh *v1alpha1.Clu
 			)
 			r.Recorder.Eventf(mesh, nil, corev1.EventTypeWarning, string(reason), "SkipNodePeering", "node %s has duplicate WireGuard IP", node.Name)
 
-			// Duplicate WG IPs are always a configuration error: two
-			// nodes claiming the same address. No retry will fix it.
+			// Duplicate WG IPs are a data error from this reconcile's point of
+			// view, but a collision is often transient: during a node
+			// replacement an IP is briefly claimed by two nodes while
+			// annotations propagate. The loser keeps existing as a real node,
+			// so its already-published Peer is handed to ReconcilePeers as a
+			// retained node rather than orphan-deleted, avoiding a tunnel
+			// teardown-and-recreate for the duration of the collision.
 			skipped++
+
+			wgIPDuplicateNodes = append(wgIPDuplicateNodes, node.Name)
 
 			continue
 		}
@@ -727,11 +738,11 @@ func (r *ClusterMeshReconciler) filterNodes(log *slog.Logger, mesh *v1alpha1.Clu
 		valid = append(valid, node)
 	}
 
-	return valid, skipped, transientSkipped
+	return valid, wgIPDuplicateNodes, skipped, transientSkipped
 }
 
 // pushPeersToTargets reconciles peers for srcEntry's nodes into every other cluster.
-func (r *ClusterMeshReconciler) pushPeersToTargets(ctx context.Context, log *slog.Logger, mesh *v1alpha1.ClusterMesh, srcEntry *v1alpha1.ClusterEntry, validNodes []*corev1.Node, status *v1alpha1.ClusterStatus) error {
+func (r *ClusterMeshReconciler) pushPeersToTargets(ctx context.Context, log *slog.Logger, mesh *v1alpha1.ClusterMesh, srcEntry *v1alpha1.ClusterEntry, validNodes []*corev1.Node, retainedNodes []string, status *v1alpha1.ClusterStatus) error {
 	desired, err := buildDesiredPeers(mesh.Name, srcEntry, validNodes, meshPersistentKeepalive(mesh))
 	if err != nil {
 		return errors.Wrapf(err, "building peers for cluster %q", srcEntry.Name)
@@ -781,7 +792,7 @@ func (r *ClusterMeshReconciler) pushPeersToTargets(ctx context.Context, log *slo
 			pushDesired = enriched
 		}
 
-		err = peer.ReconcilePeers(ctx, tgtClient, mesh.Name, srcEntry.Name, pushDesired)
+		err = peer.ReconcilePeers(ctx, tgtClient, mesh.Name, srcEntry.Name, pushDesired, retainedNodes...)
 		if err != nil {
 			return errors.Wrapf(err, "reconciling peers from %q to %q", srcEntry.Name, tgtEntry.Name)
 		}

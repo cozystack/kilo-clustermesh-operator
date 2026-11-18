@@ -38,12 +38,18 @@ import (
 // same publicKey already exists under a different name (created by a prior reconcile
 // for another mesh), the desired AllowedIPs are merged into that existing Peer
 // instead of creating a duplicate.
+//
+// retainedNodeNames names nodes that are present but transiently skipped this
+// reconcile (currently only WireGuard-IP collisions): their existing Peer is
+// kept rather than orphan-deleted, unless keeping it would conflict with a
+// desired (winner) Peer. See retainTransientPeers.
 func ReconcilePeers(
 	ctx context.Context,
 	remoteClient client.Client,
 	meshName string,
 	sourceCluster string,
 	desired []*kilov1alpha1.Peer,
+	retainedNodeNames ...string,
 ) error {
 	// Build a global map of all peers by publicKey so we can detect cross-mesh
 	// duplicates before creating new ones.
@@ -62,6 +68,8 @@ func ReconcilePeers(
 
 	desiredByName := buildDesiredMap(desired)
 	existingByName := buildExistingMap(existing)
+
+	retainTransientPeers(meshName, sourceCluster, retainedNodeNames, desiredByName, existingByName)
 
 	errs := make([]error, 0, len(desiredByName)+len(existingByName))
 
@@ -250,6 +258,84 @@ func deleteOrphans(
 	}
 
 	return errs
+}
+
+// retainTransientPeers keeps the existing Peer of a node that is present but
+// transiently skipped this reconcile (a WireGuard-IP collision while
+// annotations propagate). Such a Peer would otherwise be orphan-deleted, only
+// to be recreated once the collision clears, churning the tunnel. It is folded
+// into desiredByName as its own current spec, so reconcileDesired sees it as
+// unchanged (peerSpecEqual) and deleteOrphans leaves it alone.
+//
+// Retention is guarded: if the node's existing Peer advertises an AllowedIP a
+// desired (winner) Peer also claims, keeping it would leave two Peers with
+// different public keys claiming one AllowedIP, which WireGuard routes
+// non-deterministically. In that case the Peer is NOT retained and is left to
+// deleteOrphans — the correct outcome, since one IP cannot route to two peers.
+//
+// The conflict check is exact-string equality on AllowedIPs. BuildPeer
+// canonicalizes every AllowedIP (the WireGuard IP is always a /32 via
+// HostRoute's ip.String()), so a shared host route is always the same string
+// on winner and loser and is reliably caught. The check does NOT detect CIDR
+// containment: a winner /32 that falls inside a retained peer's wider CIDR is a
+// different string and would be retained. That overlap is only reachable when
+// AllowedNetworks is configured so a pod/service CIDR overlaps the WireGuard
+// range — a misconfiguration the normal disjoint split avoids.
+func retainTransientPeers(
+	meshName, sourceCluster string,
+	retainedNodeNames []string,
+	desiredByName map[string]*kilov1alpha1.Peer,
+	existingByName map[string]*kilov1alpha1.Peer,
+) {
+	if len(retainedNodeNames) == 0 {
+		return
+	}
+
+	claimed := claimedAllowedIPs(desiredByName)
+
+	for _, nodeName := range retainedNodeNames {
+		name := Name(meshName, sourceCluster, nodeName)
+
+		if _, alreadyDesired := desiredByName[name]; alreadyDesired {
+			continue
+		}
+
+		existingPeer, ok := existingByName[name]
+		if !ok {
+			continue
+		}
+
+		if conflictsWithClaimed(existingPeer.Spec.AllowedIPs, claimed) {
+			continue
+		}
+
+		desiredByName[name] = existingPeer
+	}
+}
+
+// claimedAllowedIPs collects every AllowedIP string advertised by a desired Peer.
+func claimedAllowedIPs(desiredByName map[string]*kilov1alpha1.Peer) map[string]struct{} {
+	claimed := make(map[string]struct{})
+
+	for _, p := range desiredByName {
+		for _, ip := range p.Spec.AllowedIPs {
+			claimed[ip] = struct{}{}
+		}
+	}
+
+	return claimed
+}
+
+// conflictsWithClaimed reports whether any of allowedIPs is already claimed by a
+// desired Peer.
+func conflictsWithClaimed(allowedIPs []string, claimed map[string]struct{}) bool {
+	for _, ip := range allowedIPs {
+		if _, ok := claimed[ip]; ok {
+			return true
+		}
+	}
+
+	return false
 }
 
 func buildDesiredMap(desired []*kilov1alpha1.Peer) map[string]*kilov1alpha1.Peer {

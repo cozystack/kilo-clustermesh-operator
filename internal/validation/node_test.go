@@ -311,6 +311,45 @@ func TestFindDuplicateWGIPs(t *testing.T) {
 	}
 }
 
+// TestFindDuplicateWGIPs_DeterministicAcrossNodeOrder pins the duplicate winner
+// to the alphabetically lowest node name regardless of the order the nodes are
+// supplied in. The caller feeds nodes in informer-cache map order, which is
+// non-deterministic; without a stable tie-break the "duplicate" designation
+// flips between reconciles, churning the Peer of whichever node loses this time
+// (deleted now, recreated next reconcile). The lowest-name node keeps the
+// WireGuard IP; the higher-name node is always the duplicate.
+func TestFindDuplicateWGIPs_DeterministicAcrossNodeOrder(t *testing.T) {
+	t.Parallel()
+
+	const sharedWGIP = "10.4.0.1/32"
+
+	nodeA := makeNode("node-a", nil, map[string]string{kilonode.AnnotationWireguardIP: sharedWGIP})
+	nodeB := makeNode("node-b", nil, map[string]string{kilonode.AnnotationWireguardIP: sharedWGIP})
+
+	orders := []struct {
+		name  string
+		nodes []*corev1.Node
+	}{
+		{name: "a before b", nodes: []*corev1.Node{nodeA, nodeB}},
+		{name: "b before a", nodes: []*corev1.Node{nodeB, nodeA}},
+	}
+
+	want := map[string]validation.NodeSkipReason{
+		"node-b": validation.ReasonWGIPDuplicate,
+	}
+
+	for _, order := range orders {
+		t.Run(order.name, func(t *testing.T) {
+			t.Parallel()
+
+			result := validation.FindDuplicateWGIPs(order.nodes)
+
+			assert.Equal(t, want, result,
+				"lowest-name node must keep the WG-IP regardless of input order")
+		})
+	}
+}
+
 func TestIsTransient(t *testing.T) {
 	t.Parallel()
 
