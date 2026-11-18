@@ -45,4 +45,11 @@ const (
 
 	// AnnotationLocation is the node annotation for Kilo's location grouping.
 	AnnotationLocation = "kilo.squat.ai/location"
+
+	// AnnotationLastSeen is Kilo's liveness heartbeat: the node's agent writes
+	// the current Unix time (seconds, decimal) on every check-in. Kilo drops a
+	// node from its topology once the value is older than twice the check-in
+	// period, so a node with a stale last-seen no longer holds its WireGuard
+	// IP in practice, even though the wireguard-ip annotation stays behind.
+	AnnotationLastSeen = "kilo.squat.ai/last-seen"
 )

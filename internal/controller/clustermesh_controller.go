@@ -712,7 +712,13 @@ func (r *ClusterMeshReconciler) filterNodes(log *slog.Logger, mesh *v1alpha1.Clu
 			// teardown-and-recreate for the duration of the collision.
 			skipped++
 
-			wgIPDuplicateNodes = append(wgIPDuplicateNodes, node.Name)
+			// Hand the loser to ReconcilePeers for retention only if it would
+			// otherwise be peerable. An invalid node (PodCIDR outside
+			// AllowedNetworks, malformed endpoint) must not keep stale routes
+			// advertised through the collision either.
+			if skip, _, _ := validation.ValidateNode(node, entry); !skip {
+				wgIPDuplicateNodes = append(wgIPDuplicateNodes, node.Name)
+			}
 
 			continue
 		}
