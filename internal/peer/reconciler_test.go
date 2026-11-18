@@ -149,6 +149,97 @@ func TestReconcilePeers_UpdateChangedPeer(t *testing.T) {
 	assert.ElementsMatch(t, []string{"10.0.0.1/32", "10.0.0.2/32"}, items[0].Spec.AllowedIPs)
 }
 
+func TestReconcilePeers_PreservesEndpointOnTransientNil(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	existing := makePeer("peer-one", []string{"10.0.0.1/32"}, "pubkey-one")
+	existing.Spec.Endpoint = &kilov1alpha1.PeerEndpoint{
+		DNSOrIP: kilov1alpha1.DNSOrIP{IP: "203.0.113.5"},
+		Port:    51820,
+	}
+	fc := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(existing).Build()
+
+	// Desired spec is identical except the endpoint resolution transiently
+	// produced none (nil). The operator must keep the last known-good endpoint
+	// instead of dropping it and churning the peer.
+	desired := []*kilov1alpha1.Peer{
+		makePeer("peer-one", []string{"10.0.0.1/32"}, "pubkey-one"),
+	}
+
+	err := peer.ReconcilePeers(ctx, fc, reconcilerTestMesh, reconcilerTestCluster, desired)
+
+	require.NoError(t, err)
+
+	items := listPeers(t, ctx, fc)
+	require.Len(t, items, 1)
+	require.NotNil(t, items[0].Spec.Endpoint, "endpoint must be preserved on transient nil")
+	assert.Equal(t, "203.0.113.5", items[0].Spec.Endpoint.IP)
+
+	// The caller's desired peer must NOT be mutated: it is shared across every
+	// target cluster (built once per source), so leaking the preserved endpoint
+	// into it would push one target's endpoint into another target's Peer.
+	assert.Nil(t, desired[0].Spec.Endpoint, "shared desired peer must not be mutated")
+}
+
+func TestReconcilePeers_EndpointChangeStillApplies(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	existing := makePeer("peer-one", []string{"10.0.0.1/32"}, "pubkey-one")
+	existing.Spec.Endpoint = &kilov1alpha1.PeerEndpoint{
+		DNSOrIP: kilov1alpha1.DNSOrIP{IP: "203.0.113.5"},
+		Port:    51820,
+	}
+	fc := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(existing).Build()
+
+	// A genuine endpoint change (non-nil desired) must replace the stored one;
+	// preservation only applies when the desired endpoint is absent.
+	desired := []*kilov1alpha1.Peer{
+		makePeer("peer-one", []string{"10.0.0.1/32"}, "pubkey-one"),
+	}
+	desired[0].Spec.Endpoint = &kilov1alpha1.PeerEndpoint{
+		DNSOrIP: kilov1alpha1.DNSOrIP{IP: "203.0.113.9"},
+		Port:    51820,
+	}
+
+	err := peer.ReconcilePeers(ctx, fc, reconcilerTestMesh, reconcilerTestCluster, desired)
+
+	require.NoError(t, err)
+
+	items := listPeers(t, ctx, fc)
+	require.Len(t, items, 1)
+	require.NotNil(t, items[0].Spec.Endpoint)
+	assert.Equal(t, "203.0.113.9", items[0].Spec.Endpoint.IP, "a real endpoint change must replace the stored one")
+}
+
+func TestReconcilePeers_DoesNotPreserveEndpointAcrossKeyChange(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	existing := makePeer("peer-one", []string{"10.0.0.1/32"}, "pubkey-old")
+	existing.Spec.Endpoint = &kilov1alpha1.PeerEndpoint{
+		DNSOrIP: kilov1alpha1.DNSOrIP{IP: "203.0.113.5"},
+		Port:    51820,
+	}
+	fc := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(existing).Build()
+
+	// A node rebuilt under the same name with a fresh public key and no endpoint
+	// yet must not inherit the previous machine's address.
+	desired := []*kilov1alpha1.Peer{
+		makePeer("peer-one", []string{"10.0.0.1/32"}, "pubkey-new"),
+	}
+
+	err := peer.ReconcilePeers(ctx, fc, reconcilerTestMesh, reconcilerTestCluster, desired)
+
+	require.NoError(t, err)
+
+	items := listPeers(t, ctx, fc)
+	require.Len(t, items, 1)
+	assert.Equal(t, "pubkey-new", items[0].Spec.PublicKey)
+	assert.Nil(t, items[0].Spec.Endpoint, "a new machine must not inherit the previous key's endpoint")
+}
+
 func TestReconcilePeers_DeleteOrphans(t *testing.T) {
 	t.Parallel()
 

@@ -20,6 +20,7 @@ import (
 	"context"
 	"log/slog"
 	"net"
+	"sort"
 	"strconv"
 	"time"
 
@@ -698,7 +699,7 @@ func (r *ClusterMeshReconciler) filterNodes(log *slog.Logger, mesh *v1alpha1.Clu
 			)
 			r.Recorder.Eventf(mesh, nil, corev1.EventTypeWarning, string(reason), "SkipNodePeering", "node %s has duplicate WireGuard IP", node.Name)
 
-			// Duplicate WG IPs are always a configuration error — two
+			// Duplicate WG IPs are always a configuration error: two
 			// nodes claiming the same address. No retry will fix it.
 			skipped++
 
@@ -908,9 +909,20 @@ func (r *ClusterMeshReconciler) updateStatus(ctx context.Context, mesh *v1alpha1
 func buildDesiredPeers(meshName string, entry *v1alpha1.ClusterEntry, nodes []*corev1.Node, meshKeepalive int) ([]*kilov1alpha1.Peer, error) {
 	peers := make([]*kilov1alpha1.Peer, 0, len(nodes))
 
-	anchorExtras := peer.CollectAnchorCIDRs(entry, nodes)
+	// The anchor node (the one whose Peer carries the uncovered declared CIDRs,
+	// folded in below for i == 0) must be deterministic. listNodes goes through
+	// the informer cache, whose List iterates a Go map, so the node order
+	// changes between reconciles. Without sorting, nodes[0] flips and any
+	// CIDR that no node covers (e.g. the service CIDR) bounces between peers on
+	// every reconcile, churning WireGuard for two or more valid nodes. Sort a
+	// copy by name so the anchor is stable.
+	sorted := make([]*corev1.Node, len(nodes))
+	copy(sorted, nodes)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
 
-	for i, node := range nodes {
+	anchorExtras := peer.CollectAnchorCIDRs(entry, sorted)
+
+	for i, node := range sorted {
 		var extras []string
 		if i == 0 {
 			extras = anchorExtras
