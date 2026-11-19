@@ -17,7 +17,9 @@ limitations under the License.
 package validation_test
 
 import (
+	"strconv"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
@@ -308,6 +310,76 @@ func TestFindDuplicateWGIPs(t *testing.T) {
 
 			assert.Equal(t, testCase.wantDuplicates, result)
 		})
+	}
+}
+
+// TestFindDuplicateWGIPs_DeterministicAcrossNodeOrder pins the duplicate winner
+// to the alphabetically lowest node name regardless of the order the nodes are
+// supplied in. The caller feeds nodes in informer-cache map order, which is
+// non-deterministic; without a stable tie-break the "duplicate" designation
+// flips between reconciles, churning the Peer of whichever node loses this time
+// (deleted now, recreated next reconcile). The lowest-name node keeps the
+// WireGuard IP; the higher-name node is always the duplicate.
+func TestFindDuplicateWGIPs_DeterministicAcrossNodeOrder(t *testing.T) {
+	t.Parallel()
+
+	const sharedWGIP = "10.4.0.1/32"
+
+	nodeA := makeNode("node-a", nil, map[string]string{kilonode.AnnotationWireguardIP: sharedWGIP})
+	nodeB := makeNode("node-b", nil, map[string]string{kilonode.AnnotationWireguardIP: sharedWGIP})
+
+	orders := []struct {
+		name  string
+		nodes []*corev1.Node
+	}{
+		{name: "a before b", nodes: []*corev1.Node{nodeA, nodeB}},
+		{name: "b before a", nodes: []*corev1.Node{nodeB, nodeA}},
+	}
+
+	want := map[string]validation.NodeSkipReason{
+		"node-b": validation.ReasonWGIPDuplicate,
+	}
+
+	for _, order := range orders {
+		t.Run(order.name, func(t *testing.T) {
+			t.Parallel()
+
+			result := validation.FindDuplicateWGIPs(order.nodes)
+
+			assert.Equal(t, want, result,
+				"lowest-name node must keep the WG-IP regardless of input order")
+		})
+	}
+}
+
+// TestFindDuplicateWGIPs_LiveNodeBeatsStaleNode pins the winner to the node
+// whose kilo.squat.ai/last-seen heartbeat is fresh, whatever the names. Kilo
+// drops a node from its topology once the heartbeat is stale, so that node no
+// longer really holds the IP; a deleted VM whose Node object lingers keeps the
+// wireguard-ip annotation and must not beat a node that is actually running.
+func TestFindDuplicateWGIPs_LiveNodeBeatsStaleNode(t *testing.T) {
+	t.Parallel()
+
+	const sharedWGIP = "10.4.0.1/32"
+
+	now := time.Now()
+
+	stale := makeNode("node-a", nil, map[string]string{
+		kilonode.AnnotationWireguardIP: sharedWGIP,
+		kilonode.AnnotationLastSeen:    strconv.FormatInt(now.Add(-time.Hour).Unix(), 10),
+	})
+	live := makeNode("node-b", nil, map[string]string{
+		kilonode.AnnotationWireguardIP: sharedWGIP,
+		kilonode.AnnotationLastSeen:    strconv.FormatInt(now.Unix(), 10),
+	})
+
+	want := map[string]validation.NodeSkipReason{
+		"node-a": validation.ReasonWGIPDuplicate,
+	}
+
+	for _, order := range [][]*corev1.Node{{stale, live}, {live, stale}} {
+		assert.Equal(t, want, validation.FindDuplicateWGIPs(order),
+			"the live node must keep the WG IP even though its name sorts after the stale one")
 	}
 }
 

@@ -254,6 +254,103 @@ func TestReconcilePeers_DeleteOrphans(t *testing.T) {
 	assert.Empty(t, listPeers(t, ctx, fc))
 }
 
+// TestReconcilePeers_RetainsNonConflictingDuplicatePeer covers a node that is
+// present but transiently skipped for a WireGuard-IP collision. Its existing
+// Peer advertises an AllowedIP that does NOT collide with any desired (winner)
+// Peer, so deleting it would needlessly tear down a working tunnel for the
+// duration of the collision. The retained node's existing Peer must survive.
+func TestReconcilePeers_RetainsNonConflictingDuplicatePeer(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+
+	dupPeerName := peer.Name(reconcilerTestMesh, reconcilerTestCluster, "dup-node")
+	existing := makePeer(dupPeerName, []string{"10.0.0.9/32"}, "pubkey-dup")
+	fc := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(existing).Build()
+
+	// Winner peer for some other node; different name, different AllowedIP.
+	desired := []*kilov1alpha1.Peer{
+		makePeer("peer-winner", []string{"10.0.0.1/32"}, "pubkey-winner"),
+	}
+
+	err := peer.ReconcilePeers(ctx, fc, reconcilerTestMesh, reconcilerTestCluster, desired, "dup-node")
+
+	require.NoError(t, err)
+
+	items := listPeers(t, ctx, fc)
+	require.Len(t, items, 2, "non-conflicting duplicate peer must be retained alongside the winner")
+
+	byName := make(map[string]kilov1alpha1.Peer, len(items))
+	for _, item := range items {
+		byName[item.Name] = item
+	}
+
+	retained, ok := byName[dupPeerName]
+	require.True(t, ok, "retained duplicate peer must survive")
+	assert.Equal(t, []string{"10.0.0.9/32"}, retained.Spec.AllowedIPs,
+		"retained peer must be left untouched")
+	assert.Contains(t, byName, "peer-winner")
+}
+
+// TestReconcilePeers_DropsConflictingDuplicatePeer covers the dangerous case of
+// a node replacement where the retained node's existing Peer advertises the
+// SAME AllowedIP a winner now claims. Keeping it would leave two Peers with
+// different public keys claiming one AllowedIP, which WireGuard routes
+// non-deterministically. The guard must drop (orphan-delete) the conflicting
+// retained Peer, leaving only the winner.
+func TestReconcilePeers_DropsConflictingDuplicatePeer(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+
+	dupPeerName := peer.Name(reconcilerTestMesh, reconcilerTestCluster, "dup-node")
+	existing := makePeer(dupPeerName, []string{"10.0.0.1/32"}, "pubkey-dup")
+	fc := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(existing).Build()
+
+	// Winner peer claims the same AllowedIP as the retained node's existing peer.
+	desired := []*kilov1alpha1.Peer{
+		makePeer("peer-winner", []string{"10.0.0.1/32"}, "pubkey-winner"),
+	}
+
+	err := peer.ReconcilePeers(ctx, fc, reconcilerTestMesh, reconcilerTestCluster, desired, "dup-node")
+
+	require.NoError(t, err)
+
+	items := listPeers(t, ctx, fc)
+	require.Len(t, items, 1, "conflicting duplicate peer must be dropped, only the winner remains")
+	assert.Equal(t, "peer-winner", items[0].Name)
+	assert.Equal(t, "pubkey-winner", items[0].Spec.PublicKey)
+}
+
+// TestReconcilePeers_DropsDuplicatePeerWithEquivalentCIDRSpelling covers an
+// anchor CIDR whose spelling differs between the winner and the retained peer.
+// Anchor CIDRs come verbatim from AllowedNetworks and are not normalized, so
+// "2001:db8::/64" and "2001:db8:0000:0000::/64" are the same network written
+// two ways. The conflict check must compare canonical network forms, otherwise
+// it keeps a retained Peer that claims a network a winner already owns.
+func TestReconcilePeers_DropsDuplicatePeerWithEquivalentCIDRSpelling(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+
+	dupPeerName := peer.Name(reconcilerTestMesh, reconcilerTestCluster, "dup-node")
+	existing := makePeer(dupPeerName, []string{"2001:db8:0000:0000::/64"}, "pubkey-dup")
+	fc := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(existing).Build()
+
+	// Winner claims the same network, spelled compactly.
+	desired := []*kilov1alpha1.Peer{
+		makePeer("peer-winner", []string{"2001:db8::/64"}, "pubkey-winner"),
+	}
+
+	err := peer.ReconcilePeers(ctx, fc, reconcilerTestMesh, reconcilerTestCluster, desired, "dup-node")
+
+	require.NoError(t, err)
+
+	items := listPeers(t, ctx, fc)
+	require.Len(t, items, 1, "equivalent-CIDR conflict must be detected, only the winner remains")
+	assert.Equal(t, "peer-winner", items[0].Name)
+}
+
 // peerForSource builds a Peer labeled mesh+source, used by the stale-source-
 // cluster cleanup tests to plant peers from multiple source-cluster values in
 // the same fake client.

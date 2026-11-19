@@ -18,6 +18,9 @@ package validation
 
 import (
 	"fmt"
+	"sort"
+	"strconv"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 
@@ -218,11 +221,40 @@ func validateEndpoint(node *corev1.Node, entry *v1alpha1.ClusterEntry) (bool, No
 // If an annotation cannot be parsed as a CIDR, the raw string is used as the
 // dedup key so that identical-invalid copies are still caught, but an invalid
 // annotation never collides with a valid one.
+//
+// The winner of a collision is deterministic: callers pass nodes in
+// informer-cache map order, which is non-deterministic, so without a stable
+// tie-break the "duplicate" designation would flip between reconciles and churn
+// the losing node's Peer (deleted now, recreated next reconcile). Nodes are
+// iterated in a sorted index: live nodes (fresh kilo.squat.ai/last-seen) before
+// stale ones, then by name. A node that is still running therefore always beats
+// a lingering dead one, and two live nodes resolve by the lowest name. The
+// input slice is not mutated.
 func FindDuplicateWGIPs(nodes []*corev1.Node) map[string]NodeSkipReason {
+	now := time.Now()
+
+	order := make([]int, len(nodes))
+	for i := range nodes {
+		order[i] = i
+	}
+
+	sort.Slice(order, func(i, j int) bool {
+		left, right := nodes[order[i]], nodes[order[j]]
+
+		leftLive, rightLive := nodeIsLive(left, now), nodeIsLive(right, now)
+		if leftLive != rightLive {
+			return leftLive
+		}
+
+		return left.Name < right.Name
+	})
+
 	seen := make(map[string]string) // normalized host IP (or raw string) → first node name
 	duplicates := make(map[string]NodeSkipReason)
 
-	for _, node := range nodes {
+	for _, idx := range order {
+		node := nodes[idx]
+
 		wgIP, ok := node.Annotations[kilonode.AnnotationWireguardIP]
 		if !ok || wgIP == "" {
 			continue
@@ -241,6 +273,33 @@ func FindDuplicateWGIPs(nodes []*corev1.Node) map[string]NodeSkipReason {
 	}
 
 	return duplicates
+}
+
+// wgIPLivenessWindow bounds how old a node's kilo.squat.ai/last-seen may be for
+// the node to count as live when two nodes claim one WireGuard IP. Kilo's own
+// Ready window is twice its check-in period (60s with the default 30s, 10m with
+// a 5m check-in), so 10m classifies a node as stale only once Kilo itself has
+// stopped routing to it. A deleted VM whose Node object lingers keeps its
+// wireguard-ip annotation for good and must not win a collision against a node
+// that is actually running.
+const wgIPLivenessWindow = 10 * time.Minute
+
+// nodeIsLive reports whether the node's kilo.squat.ai/last-seen heartbeat is
+// within wgIPLivenessWindow of now. A missing or unparsable annotation counts
+// as stale: Kilo writes it on every check-in, so a node without one has not
+// been seen by Kilo at all.
+func nodeIsLive(node *corev1.Node, now time.Time) bool {
+	raw, ok := node.Annotations[kilonode.AnnotationLastSeen]
+	if !ok || raw == "" {
+		return false
+	}
+
+	lastSeen, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return false
+	}
+
+	return now.Sub(time.Unix(lastSeen, 0)) < wgIPLivenessWindow
 }
 
 // normalizeWGIPKey returns a canonical string for use as a dedup key.
