@@ -691,11 +691,36 @@ func (r *ClusterMeshReconciler) filterNodes(log *slog.Logger, mesh *v1alpha1.Clu
 		ptrs = append(ptrs, &nodes[i])
 	}
 
-	duplicates := validation.FindDuplicateWGIPs(ptrs)
-	valid := make([]*corev1.Node, 0, len(ptrs))
+	// Resolve WireGuard-IP collisions only among nodes that are otherwise
+	// peerable. An ineligible node (e.g. one that has not published its public
+	// key yet) must never win a collision and starve the valid node that owns
+	// the IP of its Peer. Validate every node once up front, keep the verdict,
+	// and feed only the eligible nodes to the duplicate detector.
+	verdicts, eligible := validateNodes(ptrs, entry)
+
+	duplicates := validation.FindDuplicateWGIPs(eligible)
+	valid := make([]*corev1.Node, 0, len(eligible))
 	wgIPDuplicateNodes := make([]string, 0, len(duplicates))
 
 	for _, node := range ptrs {
+		verdict := verdicts[node.Name]
+		if verdict.skip {
+			log.Warn("skipping invalid node",
+				slog.String("node", node.Name),
+				slog.String("reason", string(verdict.reason)),
+				slog.String("msg", verdict.msg),
+			)
+			r.Recorder.Eventf(mesh, nil, corev1.EventTypeWarning, string(verdict.reason), "SkipNodePeering", "%s", verdict.msg)
+
+			skipped++
+
+			if validation.IsTransient(verdict.reason) {
+				transientSkipped++
+			}
+
+			continue
+		}
+
 		if reason, isDup := duplicates[node.Name]; isDup {
 			log.Warn("skipping node with duplicate WireGuard IP",
 				slog.String("node", node.Name),
@@ -709,34 +734,13 @@ func (r *ClusterMeshReconciler) filterNodes(log *slog.Logger, mesh *v1alpha1.Clu
 			// annotations propagate. The loser keeps existing as a real node,
 			// so its already-published Peer is handed to ReconcilePeers as a
 			// retained node rather than orphan-deleted, avoiding a tunnel
-			// teardown-and-recreate for the duration of the collision.
+			// teardown-and-recreate for the duration of the collision. Losers
+			// are eligible by construction (duplicates are detected only among
+			// ValidateNode-passing nodes), so retaining the Peer never keeps
+			// stale routes from an invalid node alive.
 			skipped++
 
-			// Hand the loser to ReconcilePeers for retention only if it would
-			// otherwise be peerable. An invalid node (PodCIDR outside
-			// AllowedNetworks, malformed endpoint) must not keep stale routes
-			// advertised through the collision either.
-			if skip, _, _ := validation.ValidateNode(node, entry); !skip {
-				wgIPDuplicateNodes = append(wgIPDuplicateNodes, node.Name)
-			}
-
-			continue
-		}
-
-		skip, reason, msg := validation.ValidateNode(node, entry)
-		if skip {
-			log.Warn("skipping invalid node",
-				slog.String("node", node.Name),
-				slog.String("reason", string(reason)),
-				slog.String("msg", msg),
-			)
-			r.Recorder.Eventf(mesh, nil, corev1.EventTypeWarning, string(reason), "SkipNodePeering", "%s", msg)
-
-			skipped++
-
-			if validation.IsTransient(reason) {
-				transientSkipped++
-			}
+			wgIPDuplicateNodes = append(wgIPDuplicateNodes, node.Name)
 
 			continue
 		}
@@ -745,6 +749,34 @@ func (r *ClusterMeshReconciler) filterNodes(log *slog.Logger, mesh *v1alpha1.Clu
 	}
 
 	return valid, wgIPDuplicateNodes, skipped, transientSkipped
+}
+
+// nodeVerdict caches a validation.ValidateNode result so filterNodes validates
+// each node once and reuses the outcome when deciding both collision winners
+// and skips.
+type nodeVerdict struct {
+	skip   bool
+	reason validation.NodeSkipReason
+	msg    string
+}
+
+// validateNodes runs validation.ValidateNode over every node once, returning the
+// cached verdict per node name and the subset that passes (the only nodes
+// eligible to win a WireGuard-IP collision).
+func validateNodes(ptrs []*corev1.Node, entry *v1alpha1.ClusterEntry) (map[string]nodeVerdict, []*corev1.Node) {
+	verdicts := make(map[string]nodeVerdict, len(ptrs))
+	eligible := make([]*corev1.Node, 0, len(ptrs))
+
+	for _, node := range ptrs {
+		skip, reason, msg := validation.ValidateNode(node, entry)
+		verdicts[node.Name] = nodeVerdict{skip: skip, reason: reason, msg: msg}
+
+		if !skip {
+			eligible = append(eligible, node)
+		}
+	}
+
+	return verdicts, eligible
 }
 
 // pushPeersToTargets reconciles peers for srcEntry's nodes into every other cluster.

@@ -25,6 +25,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/squat/kilo-clustermesh-operator/internal/netutil"
 	kilov1alpha1 "github.com/squat/kilo-clustermesh-operator/pkg/kilo/v1alpha1"
 )
 
@@ -273,14 +274,14 @@ func deleteOrphans(
 // non-deterministically. In that case the Peer is NOT retained and is left to
 // deleteOrphans — the correct outcome, since one IP cannot route to two peers.
 //
-// The conflict check is exact-string equality on AllowedIPs. BuildPeer
-// canonicalizes every AllowedIP (the WireGuard IP is always a /32 via
-// HostRoute's ip.String()), so a shared host route is always the same string
-// on winner and loser and is reliably caught. The check does NOT detect CIDR
-// containment: a winner /32 that falls inside a retained peer's wider CIDR is a
-// different string and would be retained. That overlap is only reachable when
+// The conflict check compares AllowedIPs by canonical network form
+// (canonicalAllowedIP), so two spellings of one network match: per-node routes
+// that BuildPeer already normalizes, and anchor CIDRs copied verbatim from
+// AllowedNetworks that it does not. The check does NOT detect CIDR containment:
+// a winner /32 that falls inside a retained peer's wider CIDR is a different
+// network and would be retained. That overlap is only reachable when
 // AllowedNetworks is configured so a pod/service CIDR overlaps the WireGuard
-// range — a misconfiguration the normal disjoint split avoids.
+// range, a misconfiguration the normal disjoint split avoids.
 func retainTransientPeers(
 	meshName, sourceCluster string,
 	retainedNodeNames []string,
@@ -319,18 +320,31 @@ func claimedAllowedIPs(desiredByName map[string]*kilov1alpha1.Peer) map[string]s
 
 	for _, p := range desiredByName {
 		for _, ip := range p.Spec.AllowedIPs {
-			claimed[ip] = struct{}{}
+			claimed[canonicalAllowedIP(ip)] = struct{}{}
 		}
 	}
 
 	return claimed
 }
 
+// canonicalAllowedIP returns the masked network form of an AllowedIP so that
+// equivalent spellings of one network compare equal (e.g. "2001:db8::/64" and
+// "2001:db8:0000:0000::/64"). An unparsable value is returned verbatim, so it
+// still matches an identical raw string.
+func canonicalAllowedIP(s string) string {
+	network, err := netutil.ParseCIDR(s)
+	if err != nil {
+		return s
+	}
+
+	return network.String()
+}
+
 // conflictsWithClaimed reports whether any of allowedIPs is already claimed by a
 // desired Peer.
 func conflictsWithClaimed(allowedIPs []string, claimed map[string]struct{}) bool {
 	for _, ip := range allowedIPs {
-		if _, ok := claimed[ip]; ok {
+		if _, ok := claimed[canonicalAllowedIP(ip)]; ok {
 			return true
 		}
 	}

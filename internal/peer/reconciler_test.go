@@ -322,6 +322,35 @@ func TestReconcilePeers_DropsConflictingDuplicatePeer(t *testing.T) {
 	assert.Equal(t, "pubkey-winner", items[0].Spec.PublicKey)
 }
 
+// TestReconcilePeers_DropsDuplicatePeerWithEquivalentCIDRSpelling covers an
+// anchor CIDR whose spelling differs between the winner and the retained peer.
+// Anchor CIDRs come verbatim from AllowedNetworks and are not normalized, so
+// "2001:db8::/64" and "2001:db8:0000:0000::/64" are the same network written
+// two ways. The conflict check must compare canonical network forms, otherwise
+// it keeps a retained Peer that claims a network a winner already owns.
+func TestReconcilePeers_DropsDuplicatePeerWithEquivalentCIDRSpelling(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+
+	dupPeerName := peer.Name(reconcilerTestMesh, reconcilerTestCluster, "dup-node")
+	existing := makePeer(dupPeerName, []string{"2001:db8:0000:0000::/64"}, "pubkey-dup")
+	fc := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(existing).Build()
+
+	// Winner claims the same network, spelled compactly.
+	desired := []*kilov1alpha1.Peer{
+		makePeer("peer-winner", []string{"2001:db8::/64"}, "pubkey-winner"),
+	}
+
+	err := peer.ReconcilePeers(ctx, fc, reconcilerTestMesh, reconcilerTestCluster, desired, "dup-node")
+
+	require.NoError(t, err)
+
+	items := listPeers(t, ctx, fc)
+	require.Len(t, items, 1, "equivalent-CIDR conflict must be detected, only the winner remains")
+	assert.Equal(t, "peer-winner", items[0].Name)
+}
+
 // peerForSource builds a Peer labeled mesh+source, used by the stale-source-
 // cluster cleanup tests to plant peers from multiple source-cluster values in
 // the same fake client.
